@@ -1,0 +1,224 @@
+---
+title: "AFCS proj"
+output: html_document
+date: "2023-12-05"
+---
+```{r, echo=FALSE}
+library(vroom)
+library(stringr)
+library(dplyr)
+library(tidyverse)
+library(kableExtra)
+library(plotly)
+library(zoo)
+library(ggthemes)
+library(ggplot2)
+library(lubridate)
+```
+
+
+
+```{r}
+#---------------------LOAD DATEASETS---------------------
+path = 'C:/Users/dimts/Downloads/'
+
+sell_prices <- vroom(str_c(path,"sell_prices_afcs2023.csv"), delim = ",", col_types = cols())
+
+sales_train_validation <- vroom(str_c(path,"sales_train_validation_afcs2023.csv"), delim = ",", col_types = cols())
+
+calendar <- vroom(str_c(path,"calendar_afcs2023.csv"), delim = ",", col_types = cols())
+
+#sales_test_validation <- vroom(str_c(path,"sales_test_validation_afcs2022.csv"), delim = ",", col_types = cols())
+
+#samples_submission <- vroom(str_c(path,"sample_submission_afcs2023.csv"), delim = ",", col_types = cols())
+
+```
+
+```{r}
+#Quick look at datasets
+file <- sales_train_validation #calendar , sales_train_validation , sell_prices
+file %>% 
+  select(seq(1,10,1)) %>% 
+  head(10) %>% 
+  kable() %>% 
+  kable_styling()
+```
+
+By observing the Time series for total sales, we notice an increasing Trend in total sales, with obvious seasonality. Most noticeably, there are 5 troughs in sales that have yearly seasonality and occur near the end of the year. Other than that, there are random spikes throughout the series that could be circumstantial. The overall variation is constant, so it does not increase with the level of the series. 
+```{r}
+extract_ts <- function(df){
+  min_date <- as.Date("2011-01-29") #lowest data, corresponds to d_1
+  df %>%
+    select(id, starts_with("d_")) %>%   #take the id of the item and the daily sales columns
+    pivot_longer(starts_with("d_"), names_to = "dates", values_to = "sales") %>%     #reshape
+    mutate(dates = as.integer(str_remove(dates, "d_"))) %>%   
+    mutate(dates = min_date + dates - 1) %>%         #turn day numbers into dates
+    mutate(id = str_remove(id, "_validation"))       #remove end of item id
+}
+
+foo <- sales_train_validation %>%            #sum of columns for each day
+  summarise_at(vars(starts_with("d_")), sum) %>% 
+  mutate(id = 1)
+
+bar <- extract_ts(foo)
+gg <- bar %>% 
+  ggplot(aes(dates, sales)) +
+  geom_line(col = "blue") +
+  theme_tufte() +
+  labs(x = "Date", y = "Sales", title = "Total sales Time series")
+
+ggplotly(gg, dynamicTicks = TRUE)
+```
+
+```{r}
+sales_long <- sales_train_validation %>%
+  select(id, starts_with("d_")) %>%  
+  pivot_longer(starts_with("d_"), names_to = "dates", values_to = "sales") %>%
+  mutate(dates = as.integer(str_remove(dates, "d_")))
+
+plot <- sales_long %>%
+  plot_ly(x = ~as.Date("2011-01-29") + dates - 1, y = ~sales, color = ~id, type = 'scatter', mode = 'lines') %>%
+  layout(title = "Sales Over Time",
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "Sales"),
+         showlegend = TRUE,
+         colorway = 'Set3')
+
+plot
+```
+
+```{r}
+#50 random items, more clear info
+set.seed(123)  # Set seed for reproducibility
+random_items <- sample(unique(sales_train_validation$id), 50)
+
+sales_selected <- sales_train_validation %>%
+  filter(id %in% random_items) %>%
+  select(id, starts_with("d_")) %>%  
+  pivot_longer(starts_with("d_"), names_to = "dates", values_to = "sales") %>%
+  mutate(dates = as.integer(str_remove(dates, "d_")))
+
+plot <- sales_selected %>%
+  plot_ly(x = ~as.Date("2011-01-29") + dates - 1, y = ~sales, color = ~id, type = 'scatter', mode = 'lines') %>%
+  layout(title = "Sales Over Time (Random 50 Items)",
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "Sales"),
+         showlegend = TRUE,
+         colorway = "Set3")
+
+plot
+```
+
+By plotting the daily sales for each item we observe a that there are many low values with some seemingly random spikes. These spikes, if they were random or similar to white would make our forecasts difficult. For that reason we investigate further, using the calendar dataset which reveals information that might affect sales, such as annual events or promotions.
+
+```{r}
+#Create a dataset that has the information on events and selling price for every day, for every item_id 
+merged_data <- calendar %>%
+  left_join(sell_prices %>% select(wm_yr_wk, item_id, sell_price), by = "wm_yr_wk") %>%
+  group_by(wm_yr_wk, item_id) %>%
+  fill(sell_price)
+
+merged_data
+```
+
+```{r}
+# Step 1: Define the extract_ts function
+extract_ts <- function(df) {
+  min_date <- as.Date("2011-01-29") # lowest data, corresponds to d_1
+  df %>%
+    select(id, starts_with("d_")) %>%   # take the id of the item and the daily sales columns
+    pivot_longer(starts_with("d_"), names_to = "dates", values_to = "sales") %>%     # reshape
+    mutate(dates = as.integer(str_remove(dates, "d_"))) %>%   
+    mutate(dates = min_date + dates - 1) %>%         # turn day numbers into dates
+    mutate(id = str_remove(id, "_validation"))       # remove end of item id
+}
+
+# Step 2: Define the ACF plot function
+acf_plot <- function(df, id) {
+  df %>%
+    filter(id == id) %>%
+    ggplot(aes(x = dates, y = sales)) +
+    geom_line() +
+    labs(title = paste("ACF Plot for Item", id),
+         x = "Date",
+         y = "Sales")
+}
+
+# Step 3: Use extract_ts to create the time series data
+foo <- sales_train_validation %>%            # sum of columns for each day
+  summarise_at(vars(starts_with("d_")), sum) %>% 
+  mutate(id = 1)
+
+acf_plot(foo, id = 1)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+#change full name to shorter
+#merge datasets so we have for the given day, the price, the even and also the amount sold
+
+#transpose the sales_train_validation dataset
+sales_train_validation <- t(sales_train_validation)
+sales_train_validation <- as.data.frame(sales_train_validation, stringsAsFactors = FALSE)
+print(sales_train_validation)
+
+# Set the first column as row names
+colnames(sales_train_validation) <- sales_train_validation[1, ]
+sales_train_validation <- sales_train_validation[-1, ]
+
+# Modify column names
+new_column_names <- gsub("_TX_3_validation", "", colnames(sales_train_validation))
+colnames(sales_train_validation) <- new_column_names
+
+# Print the transposed and modified dataset
+print(sales_train_validation)
+merged_data
+```
+
+```{r}
+# Transpose the dataset
+transposed_sales <- t(sales_train_validation)
+
+# Convert to a data frame
+transposed_sales_df <- as.data.frame(transposed_sales, stringsAsFactors = FALSE)
+
+colnames(transposed_sales_df) <- transposed_sales_df[1, ]
+transposed_sales_df <- transposed_sales_df[-1, ]
+new_column_names <- gsub("_TX_3_validation", "", colnames(transposed_sales_df))
+colnames(transposed_sales_df) <- new_column_names
+print(transposed_sales_df)
+
+```
+
+```{r}
+merged_data
+
+count_11101 <- sum(sell_prices$wm_yr_wk == 11101)
+print(count_11101)
+```
