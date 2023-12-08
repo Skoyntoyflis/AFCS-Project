@@ -113,45 +113,34 @@ plot
 
 By plotting the daily sales for each item we observe that there are many low values with some seemingly random spikes. These spikes, if they were random or similar to white noise would make our forecasts difficult. Another challenge is that not all products are available every day; some have gaps in their records, others start or stop being offered at different times in the studied period. For that reason we investigate further, using the calendar dataset which reveals information that might affect sales, such as annual events or promotions.
 
-```{r}
-#Create a dataset that has the information on events and selling price for every day, for every item_id 
-merged_data <- calendar %>%
-  left_join(sell_prices %>% select(wm_yr_wk, item_id, sell_price), by = "wm_yr_wk") %>%
-  group_by(wm_yr_wk, item_id) %>%
-  fill(sell_price)
-
-tail(merged_data,1000)
-```
-
-Prepare sales dataset in a mergeable format.
+Merging happens here. First merge the calendar and sales_train to keep sales for every day for each item.
 ```{r}
 #change column names from d_1 to dates
 #also fix item_id
 sales_train_validation_long <- sales_train_validation %>%
-  pivot_longer(cols = -id, names_to = "date", values_to = "sales")
-
-sales_train_validation_long <- sales_train_validation_long %>%
-  mutate(date = as.Date("2011-01-29") + as.integer(str_remove(date, "d_")) - 1)
-
-sales_train_validation_long <- sales_train_validation_long %>%
-  rename(item_id = id)
-
-sales_train_validation_long <- sales_train_validation_long %>%
+  pivot_longer(cols = -id, names_to = "date", values_to = "sales") %>%
+  mutate(date = as.Date("2011-01-29") + as.integer(str_remove(date, "d_")) - 1) %>%
+  rename(item_id = id) %>%
   mutate(item_id = str_remove(item_id, "_TX_3_validation"))
-
 sales_train_validation_long
 ```
 
-
-Merging all 3 datasets, to have the information on event, price and sells together. Should be easier to study correlations like this. (Hypothesis Testing?)
-
-Notice how there are gaps in the item_id. This is because in the sell_prices doc the price is only provided for every week the product is available, otherwise there are gaps/missing weeks.
+Now merge the above with the sell_prices. We should now have the daily data for each item's price and sales.
 ```{r}
-result <- merged_data %>%
-  mutate(date = as.Date(date, format = "%m/%d/%Y")) %>%
-  left_join(sales_train_validation_long, by = c("date", "item_id"))
-result
+calendar <- calendar %>%
+  mutate(date = as.Date(date, format = "%m/%d/%Y"))
+
+result <- merge(calendar, sales_train_validation_long, by = "date", all.x = TRUE)
+result <- result %>%
+  arrange(date, item_id)
+
+merged_data <- result %>%
+  left_join(sell_prices %>% select(wm_yr_wk, item_id, sell_price), by = c("wm_yr_wk", "item_id"))
+
+merged_data
 ```
+
+
 
 
 Heatmap for sales per day Mon-Sun per month:
@@ -229,18 +218,6 @@ ggplot(event_counts_snap_tx_1, aes(x = event_type_1, y = count, fill = event_typ
   labs(title = "Number of Days with Events by Event Type (SNAP_TX = 1)", x = "Event Type", y = "Count") +
   theme_minimal()
 ```
-
-
-
-
-```{r}
-result
-```
-
-
-
-
-
 
 
 
