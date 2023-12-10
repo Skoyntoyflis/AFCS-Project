@@ -1,0 +1,313 @@
+---
+title: "Price-Events/SeasonalityEDA"
+author: "Jakob Chumtong (12986992)"
+date: "2023-12-10"
+output: pdf_document
+---
+
+
+```{r, echo=FALSE}
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(forecast)
+```
+
+
+```{r}
+# Read the data
+calendar <- read.csv("calendar_afcs2023.csv")
+sell_prices <- read.csv("sell_prices_afcs2023.csv")
+sales_data <- read.csv("sales_train_validation_afcs2023.csv") 
+```
+
+```{r}
+#change column names from d_1 to dates
+#also fix item_id
+sales_data <- sales_data %>%
+  pivot_longer(cols = -id, names_to = "date", values_to = "sales") %>%
+  mutate(date = as.Date("2011-01-29") + as.integer(str_remove(date, "d_")) - 1) %>%
+  rename(item_id = id) %>%
+  mutate(item_id = str_remove(item_id, "_TX_3_validation"))
+
+sales_data
+```
+```{r}
+calendar <- calendar %>%
+  mutate(date = as.Date(date, format = "%m/%d/%Y"))
+
+result <- merge(calendar, sales_data, by = "date", all.x = TRUE)
+result <- result %>%
+  arrange(date, item_id)
+
+merged_data <- result %>%
+  left_join(sell_prices %>% select(wm_yr_wk, item_id, sell_price), by = c("wm_yr_wk", "item_id"))
+
+merged_data
+```
+```{r}
+# Filtering days with events
+days_with_events <- calendar %>% 
+  select(date, event_type_1) %>% 
+  count(event = !is.na(event_type_1)) %>% 
+  add_tally(n, name = "total") %>% 
+  mutate(perc = n / total)
+
+# Creating a bar plot for days with events
+event_bar_plot <- days_with_events %>%
+  ggplot(aes(event, perc, fill = event)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(values = c("grey70", "red")) +
+  theme_minimal() +
+  labs(x = "", y = "", title = "Days with Events", fill = "Event") +
+  theme(legend.position = "none")
+
+# Displaying the bar plot
+print(event_bar_plot)
+```
+```{r}
+# Filtering and counting event types
+event_types_count <- calendar %>% 
+  filter(!is.na(event_type_1)) %>% 
+  count(event_type_1) %>% 
+  add_tally(n, name = "total") %>% 
+  mutate(perc = n / total)
+
+# Creating a bar plot for event types
+event_types_plot <- event_types_count %>%
+  ggplot(aes(reorder(event_type_1, n, FUN = min), perc, fill = event_type_1)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::percent) +
+  coord_flip() +
+  theme_minimal() +
+  labs(x = "", y = "", title = "Types of events", fill = "Event Type") +
+  theme(legend.position = "none")
+
+# Displaying the bar plot for event types
+print(event_types_plot)
+```
+
+```{r}
+ggplot(merged_data, aes(x = event_type_1, y = sell_price, fill = event_type_1)) +
+  geom_boxplot() +
+  labs(x = "Event Type", y = "Sell Price", fill = "Event Type") +
+  theme_minimal()
+```
+```{r}
+# Filter out rows with non-zero sell prices and events
+filtered_data <- merged_data %>%
+  filter(sell_price > 0 & (!is.na(event_name_1) | !is.na(event_name_2)))
+
+# Create a boxplot to visualize price variations for each event
+ggplot(filtered_data, aes(x = factor(event_name_1), y = sell_price, fill = factor(event_name_1))) +
+  geom_boxplot() +
+  labs(title = "Price Variations for Different Events", x = "Event Name", y = "Sell Price") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0.5))
+```
+```{r}
+summary_stats_event_type <- merged_data %>%
+  group_by(event_type_1) %>%
+  summarize(
+    Mean_Price = mean(sell_price, na.rm = TRUE),
+    Median_Price = median(sell_price, na.rm = TRUE),
+    Min_Price = min(sell_price, na.rm = TRUE),
+    Max_Price = max(sell_price, na.rm = TRUE)
+  )
+
+# Display summary statistics
+print(summary_stats_event_type)
+```
+
+```{r}
+summary_stats_event_name <- merged_data %>%
+  group_by(event_name_1) %>%
+  summarize(
+    Mean_Price = mean(sell_price, na.rm = TRUE),
+    Median_Price = median(sell_price, na.rm = TRUE),
+    Min_Price = min(sell_price, na.rm = TRUE),
+    Max_Price = max(sell_price, na.rm = TRUE)
+  )
+
+# Display summary statistics
+print(summary_stats_event_name)
+```
+
+```{r}
+# Extracting the latest year
+latest_year <- max(merged_data$year)
+
+# Filter data for the latest year
+latest_year_data <- merged_data %>%
+  filter(year == latest_year)
+
+summary_stats_latest_year_event_type <- latest_year_data %>%
+  group_by(event_type_1) %>%
+  summarize(
+    Mean_Price = mean(sell_price, na.rm = TRUE),
+    Median_Price = median(sell_price, na.rm = TRUE),
+    Min_Price = min(sell_price, na.rm = TRUE),
+    Max_Price = max(sell_price, na.rm = TRUE)
+  )
+
+# Display summary statistics
+print(summary_stats_latest_year_event_type )
+```
+
+```{r}
+summary_stats_latest_year_event_name <- latest_year_data %>%
+  group_by(event_name_1) %>%
+  summarize(
+    Mean_Price = mean(sell_price, na.rm = TRUE),
+    Median_Price = median(sell_price, na.rm = TRUE),
+    Min_Price = min(sell_price, na.rm = TRUE),
+    Max_Price = max(sell_price, na.rm = TRUE)
+  )
+
+# Display summary statistics
+print(summary_stats_latest_year_event_name)
+```
+```{r}
+# Calculate average sell prices by event type
+average_prices_by_event <- merged_data %>%
+  group_by(event_type_1) %>%
+  summarize(Average_Price = mean(sell_price, na.rm = TRUE))
+
+# Find the event with the maximum average price
+max_average_price <- max(average_prices_by_event$Average_Price)
+max_average_event <- average_prices_by_event$event_type_1[which.max(average_prices_by_event$Average_Price)]
+
+# Find the event with the minimum average price
+min_average_price <- min(average_prices_by_event$Average_Price)
+min_average_event <- average_prices_by_event$event_type_1[which.min(average_prices_by_event$Average_Price)]
+
+# Display events with maximum and minimum average prices
+cat("Event Type with Maximum Average Price:", max_average_event, "with average price:", max_average_price, "\n")
+cat("Event Type with Minimum Average Price:", min_average_event, "with average price:", min_average_price, "\n")
+```
+
+```{r}
+# Calculate average sell prices by event name
+average_prices_by_event <- merged_data %>%
+  group_by(event_name_1) %>%
+  summarize(Average_Price = mean(sell_price, na.rm = TRUE))
+
+# Find the event with the maximum average price
+max_average_price <- max(average_prices_by_event$Average_Price)
+max_average_event <- average_prices_by_event$event_name_1[which.max(average_prices_by_event$Average_Price)]
+
+# Find the event with the minimum average price
+min_average_price <- min(average_prices_by_event$Average_Price)
+min_average_event <- average_prices_by_event$event_name_1[which.min(average_prices_by_event$Average_Price)]
+
+# Display events with maximum and minimum average prices
+cat("Event with Maximum Average Price:", max_average_event, "with average price:", max_average_price, "\n")
+cat("Event with Minimum Average Price:", min_average_event, "with average price:", min_average_price, "\n")
+```
+```{r}
+# Extract month and year from the date column
+merged_data$YearMonth <- floor_date(merged_data$date, unit = "month")
+
+# Calculate average sell prices by month
+average_prices_by_month <- merged_data %>%
+  group_by(YearMonth) %>%
+  summarize(Average_Price = mean(sell_price, na.rm = TRUE))
+
+# Create a time series plot of average sell prices over months
+ggplot(average_prices_by_month, aes(x = YearMonth, y = Average_Price)) +
+  geom_line() +
+  labs(x = "Year-Month", y = "Average Sell Price", title = "Seasonal Plot of Sell Prices") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r}
+
+# Calculate average sell prices by date
+average_prices_by_date <- merged_data %>%
+  group_by(date) %>%
+  summarize(Average_Price = mean(sell_price, na.rm = TRUE))
+
+# Remove missing values
+average_prices_by_date <- na.omit(average_prices_by_date)
+
+# Create a time series object
+ts_prices <- ts(average_prices_by_date$Average_Price, frequency = 7)  # Assuming daily data
+
+# ACF plot
+acf(ts_prices, main = "ACF Plot for Sell Prices")
+```
+```{r}
+# Calculate average sell prices by date
+average_prices_by_date <- merged_data %>%
+  group_by(date) %>%
+  summarize(Average_Price = mean(sell_price, na.rm = TRUE))
+
+# Remove missing values
+average_prices_by_date <- na.omit(average_prices_by_date)
+
+# Create a time series object
+ts_prices <- ts(average_prices_by_date$Average_Price, frequency = 7) 
+
+# Time series decomposition
+decomposed_prices <- decompose(ts_prices)
+
+# Plotting the decomposition
+autoplot(decomposed_prices) +
+  labs(title = "Time Series Decomposition of Sell Prices")
+```
+
+```{r}
+foo <- merged_data %>%
+  filter(!str_detect(as.character(date), "-12-25")) %>%
+  mutate(loess_fit = loess(sales ~ as.integer(date - min(date)) + 1, span = 1/2, degree = 1),
+         loess = predict(loess_fit),
+         mean_sales = mean(sales),
+         sales_rel = (sales - loess) / mean_sales,
+         is_event = !is.na(event_type_1)) 
+
+p1 <- foo %>% 
+  ggplot(aes(dates, sales/1e3, group = is_event, col = is_event)) +
+  geom_line(aes(dates, loess/1e3), col = "black", linetype = 2) +
+  geom_line(alpha = 0.3) +
+  geom_smooth(method = "loess", formula = 'y ~ x', span = 2/3, se = FALSE) +
+  scale_colour_manual(values = c("grey70", "red")) +
+  facet_wrap(~ state_id, scales = "free") +
+  theme_hc() +
+  theme(legend.position = "right") +
+  labs(x = "", y = "Sales [$1k]", col = "Event", title = "Sales per State during special events vs non-events")
+
+p2 <- foo %>% 
+  ggplot(aes(state_id, sales_rel, fill = is_event)) +
+  geom_boxplot() +
+  coord_flip() +
+  scale_fill_manual(values = c("grey70", "red")) +
+  theme_hc() +
+  theme(legend.position = "none", axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+        axis.title.x = element_text(size = 10)) +
+  labs(x = "", y = "Relative Sales", fill = "event")
+
+p3 <- foo %>%
+  filter(is_event == TRUE) %>% 
+  group_by(state_id, event_type_1) %>% 
+  summarise(sales = median(sales_rel)) %>% 
+  ggplot(aes(state_id, sales, fill = event_type_1)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  theme_hc() +
+  theme(legend.position = "right", axis.title.x = element_text(size = 10)) +
+  labs(x = "", y = "Median Relative Sales", fill = "Type")
+
+layout <- '
+AAAAAA
+AAAAAA
+AAAAAA
+BBBCCD
+BBBCCD
+'
+
+p1 + p2 + p3 + guide_area() + plot_layout(design = layout, guides = 'collect')
+```
+```
+
+
+
