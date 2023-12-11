@@ -40,6 +40,8 @@ library('purrr') # data wrangling
 library('stringr') # string manipulation
 library('forcats') # factor manipulation
 library('fuzzyjoin') # data wrangling
+library(tidyverse)
+
 
 # specific visualisation
 library('alluvial') # visualisation
@@ -934,7 +936,40 @@ p4 <- foo %>%
 
 
 
+```{r}
 
+
+# Calculate max_sell_price for each item_id
+dt_tmp <- sell_prices %>%
+  group_by(item_id) %>%
+  summarise(max_sell_price = max(sell_price))
+
+# Assign price_rank based on the descending order of max_sell_price
+dt_tmp <- dt_tmp %>%
+  mutate(price_rank = row_number(desc(max_sell_price)))
+
+# Join the data and plot the top 30 items by max_sell_price
+g <- 
+  sell_prices %>%  
+  left_join(dt_tmp, by = "item_id") %>% 
+  filter(price_rank <= 30) %>% 
+  mutate(item_name = str_sub(item_id, nchar(item_id)-3, nchar(item_id))) %>%
+  ggplot(aes(x = reorder(item_name, price_rank), y = sell_price)) +
+  geom_boxplot(color = "dodgerblue3", fill = "lightsteelblue1", alpha = 0.5) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "item_id", y = "Sell price", 
+       title = "Top 30 Items by Maximum Selling Price",
+       subtitle = "Each item's maximum selling price and its rank")
+
+plot(g)
+
+```
+Here’s a breakdown of the elements in this boxplot:
+
+Central line in the box: Median of the data (second quartile).
+Box: Spans from the first quartile (Q1) to the third quartile (Q3), containing the middle 50% of the data.
+Whiskers: Extend from the box to the smallest and largest values within 1.5 * IQR from the Q1 and Q3, respectively.
+Dots (Outliers): Data points that fall outside the range of the whiskers.
 
 
 
