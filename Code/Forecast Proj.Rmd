@@ -70,6 +70,22 @@ library('doParallel')
 ```
 
 
+```{r}
+library(fpp3)
+library(latex2exp)
+library(rmarkdown)
+library(skimr)
+library(dplyr)
+library(tsibble)
+library(forecast)
+library(stats)
+library(ggplot2)
+library(fable)
+library(fabletools)
+library(cowplot)
+```
+
+
 
 Quick loading the datasets
 ```{r}
@@ -82,10 +98,15 @@ sales_train_validation <- vroom(str_c(path,"sales_train_validation_afcs2023.csv"
 
 calendar <- vroom(str_c(path,"calendar_afcs2023.csv"), delim = ",", col_types = cols())
 
-#sales_test_validation <- vroom(str_c(path,"sales_test_validation_afcs2022.csv"), delim = ",", col_types = cols())
+sales_test_validation <- vroom(str_c(path,"sales_test_validation_afcs2022.csv"), delim = ",", col_types = cols())
 
 #samples_submission <- vroom(str_c(path,"sample_submission_afcs2023.csv"), delim = ",", col_types = cols())
 
+```
+
+
+```{r}
+summary(calendar)
 ```
 
 Check datasets - similar to opening csv file
@@ -171,6 +192,7 @@ By plotting the daily sales for each item we observe that there are many low val
 
 Merging happens here. First merge the calendar and sales_train to keep sales for every day for each item.
 ```{r}
+# summary(sales_train_validation)
 #change column names from d_1 to dates
 #also fix item_id
 sales_train_validation_long <- sales_train_validation %>%
@@ -178,7 +200,7 @@ sales_train_validation_long <- sales_train_validation %>%
   mutate(date = as.Date("2011-01-29") + as.integer(str_remove(date, "d_")) - 1) %>%
   rename(item_id = id) %>%
   mutate(item_id = str_remove(item_id, "_TX_3_validation"))
-sales_train_validation_long
+summary(sales_train_validation_long)
 ```
 
 Now merge the above with the sell_prices. We should now have the daily data for each item's price and sales.
@@ -191,9 +213,10 @@ result <- result %>%
   arrange(date, item_id)
 
 merged_data <- result %>%
-  left_join(sell_prices %>% select(wm_yr_wk, item_id, sell_price), by = c("wm_yr_wk", "item_id"))
+  left_join(sell_prices %>% select(wm_yr_wk, item_id, sell_price), by = c("wm_yr_wk", "item_id"))|>
+  filter(!is.na(sales),!is.infinite(sales))
 
-merged_data 
+summary(merged_data) 
 
 
 ```
@@ -228,7 +251,7 @@ summary(merged_data)
 #||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 
 ```{r}
-write.csv(merged_data,"merged_data.csv", row.names=FALSE)
+write.csv(merged_data,"../Data/merged_data.csv", row.names=FALSE)
 ```
 
 
@@ -236,7 +259,7 @@ write.csv(merged_data,"merged_data.csv", row.names=FALSE)
 ```{r}
 # Filter out rows where sales and sell_price are not NA
 # Load the merged data
-merged_data2 <- read.csv("merged_data.csv")
+merged_data2 <- read.csv("../Data/merged_data.csv")
 #cleaned_data <- merged_data2 %>% filter(!is.na(sales)  & is.na(sell_price))
 summary(merged_data2)
 
@@ -252,7 +275,7 @@ summary(merged_data2)
 merged_data2 <- merged_data2 %>%
   mutate(
     date = as.Date(date),
-    wm_yr_wk = as.double(wm_yr_wk),
+    wm_yr_wk = as.double(wm_yr_w/k),
     weekday = as.character(weekday),
     wday = as.double(wday),
     month = as.double(month),
@@ -867,7 +890,7 @@ gg <- example %>%
   geom_line(aes(dates, rel_price), col = "orange", size = 3, alpha = 0.3, na.rm = TRUE) +
   #eom_point(aes(dates, has_event), na.rm = TRUE) +
   # coord_cartesian(xlim = c(date("2015-05-01"), date("2015-10-01"))) + 
-  facet_wrap(~id, nrow = 3, scales = "free") +
+  facet_wrap(~id, nrow = 3, scales = "free") +   
   theme_hc() +
   theme(legend.position = "none", strip.background = element_blank(), strip.text = element_text(size = 10),
         panel.spacing = unit(1, "lines"), plot.title = element_text(size = 10)) +
@@ -971,13 +994,13 @@ dt_tmp <- dt_tmp %>%
 g <- 
   sell_prices %>%  
   left_join(dt_tmp, by = "item_id") %>% 
-  filter(price_rank <= 30) %>% 
+  filter(price_rank <= 50) %>% 
   mutate(item_name = str_sub(item_id, nchar(item_id)-3, nchar(item_id))) %>%
   ggplot(aes(x = reorder(item_name, price_rank), y = sell_price)) +
   geom_boxplot(color = "dodgerblue3", fill = "lightsteelblue1", alpha = 0.5) +
   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
   labs(x = "item_id", y = "Sell price", 
-       title = "Top 30 Items by Maximum Selling Price",
+       title = "Top 50 Items by Maximum Selling Price",
        subtitle = "Each item's maximum selling price and its rank")
 
 plot(g)
@@ -996,6 +1019,355 @@ Dots (Outliers): Data points that fall outside the range of the whiskers.
 
 
 
+
+#!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Forecasting from now on
+
+
+```{r}
+print(merged_data)
+```
+
+```{r}
+#50 random items, more clear info
+set.seed(123)  # Set seed for reproducibility
+random_items <- sample(unique(merged_data$item_id), 5)
+
+```
+
+```{r}
+random_items
+```
+
+
+```{r}
+merged_full_selected <- merged_data |>
+  filter(item_id %in% random_items) %>%
+  as_tsibble(key = item_id,
+             index = date)
+
+fit <- merged_full_selected |>
+  model(base = ARIMA(sales, stepwise = FALSE, approx = FALSE))
+```
+
+```{r}
+fc <- fit |>forecast(h = "28 days")
+```
+
+```{r}
+fc |>
+  filter(item_id == "FOODS_3_375")|>
+  autoplot(
+    merged_full_selected,
+    level = NULL
+  ) +
+  labs(y = "Sales" ) 
+```
+
+```{r}
+library(ggplot2)
+
+fc %>%
+  autoplot(merged_full_selected, level = NULL) +
+  facet_wrap(~ item_id, scales = "free_y") +
+  labs(y = "Sales")
+
+```
+
+
+```{r}
+merged_full
+```
+
+
+
+
+```{r}
+fc <- fit |> forecast(h = "28 days")
+```
+
+
+
+
+Try with fourier
+
+```{r}
+merged_full_selected <- merged_data |>
+  mutate(date = as.Date(date, format = "%m/%d/%Y")) %>%
+  filter(item_id %in% random_items) %>%
+  as_tsibble(key = item_id,
+             index = date)
+
+fit <- merged_full_selected |>
+  model(
+    `K = 1` = ARIMA(sales ~ fourier(K = 1)+ PDQ(0,0,0)),
+    `K = 2` = ARIMA(sales ~ fourier(K = 2)+ PDQ(0,0,0)),
+    `K = 3` = ARIMA(sales ~ fourier(K = 3)+ PDQ(0,0,0))#,
+    # `K = 4` = ARIMA(sales ~ fourier(K = 4)+ PDQ(0,0,0)),
+    # `K = 5` = ARIMA(sales ~ fourier(K = 5)+ PDQ(0,0,0)),
+    # `K = 6` = ARIMA(sales ~ fourier(K = 6)+ PDQ(0,0,0))
+  )
+```
+
+
+```{r}
+fit |>
+  forecast(h = "28 days") |>
+  autoplot(merged_full_selected, level = 95) +
+  facet_wrap(vars(.model), ncol = 1) +
+  guides(colour = "none", fill = "none", level = "none") +
+  
+  labs(title= "Total monthly eating-out expenditure",
+       y="$ billions")
+```
+
+```{r}
+str(merged_data)
+```
+
+```{r}
+library(fable.prophet)
+
+merged_full_selected <- merged_data %>%
+  filter(item_id %in% random_items) %>%
+  as_tsibble(key = item_id, index = date)
+
+
+fit <- merged_full_selected |>
+  model(prophet = prophet(sales  ~  snap_TX + event_name_1 + event_type_1 + event_name_2 + event_type_2 +
+            season(period = "week", order = 3, type = "multiplicative") +
+            season(period = "year", order = 10, type = "multiplicative")))
+
+
+
+
+
+# Generate the future dataframe
+merged_future <- new_data(merged_full_selected,28)
+
+last_sell_prices <- merged_data %>%
+  group_by(item_id) %>%
+  summarise(sell_price = last(sell_price))
+
+# Merge the last known 'sell_price' into merged_future
+merged_future <- merged_future |>
+  left_join(last_sell_prices, by = "item_id") |>
+  ungroup()  # Remove grouping
+
+merged_future <- merged_future |> left_join(calendar %>% select(date,event_name_1,event_type_1,event_name_2,event_type_2,snap_TX), by = "date")
+
+
+# write.csv(merged_future,"../Data/merged_future.csv", row.names=FALSE)
+
+glance(fit)
+
+fc<-forecast(fit, new_data =  merged_future)
+
+fc
+
+
+```
+
+
+```{r}
+library(fable.prophet)
+library(fastDummies)
+#50 random items, more clear info
+set.seed(123)  # Set seed for reproducibility
+random_items <- sample(unique(merged_data$item_id), 50)
+
+
+
+# Convert categorical variables to dummy variables
+
+merged_full_selected <- fastDummies::dummy_cols(merged_data %>%
+  mutate(across(c("event_name_1", "event_name_2", "event_type_1", "event_type_2"), ~replace(., is.na(.), "None"))), select_columns = c("event_name_1", "event_type_1", "event_name_2", "event_type_2")) %>%
+  filter(item_id %in% random_items) %>%
+  as_tsibble(key = item_id, index = date)
+
+
+colnames(merged_full_selected) <- gsub(" ", "_", colnames(merged_full_selected))
+colnames(merged_full_selected) <- gsub("-", "_", colnames(merged_full_selected))
+colnames(merged_full_selected) <- gsub("'", "_", colnames(merged_full_selected))
+
+write.csv(merged_full_selected,"../Data/merged_full_selected.csv", row.names=FALSE)
+
+
+# Select only dummy variables
+dummy_vars <- select(merged_full_selected, starts_with("event_name_1_"), starts_with("event_type_1_"), starts_with("event_name_2_"), starts_with("event_type_2_"))
+
+# Exclude date and item_id columns
+dummy_vars <- dummy_vars[, !colnames(dummy_vars) %in% c("date", "item_id")]
+
+colnames(dummy_vars) <- str_trim(colnames(dummy_vars))
+
+dummy_cols <- colnames(dummy_vars)
+# print(dummy_cols)
+
+# Escape column names with spaces
+dummy_cols <- paste0("`", dummy_cols, "`")
+
+
+# Create the string format
+regressor_string <- paste(dummy_cols, collapse = " + ")
+# print(regressor_string)
+
+# Include the string in the formula
+sales_formula <- formula(paste("sales ~ snap_TX + ", regressor_string,
+                               "+ season(period = 'week', order = 3, type = 'multiplicative')",
+                               "+ season(period = 'year', order = 10, type = 'multiplicative')"))
+# print(regressor_string)
+# Fit the model
+fit <- merged_full_selected |>
+  model(prophet = prophet(sales_formula))
+
+
+
+
+# 
+# # Fit the model
+# fit <- merged_full_selected |>
+#   model(prophet = prophet(sales ~ snap_TX + event_name_1 + event_type_1 + event_name_2 + event_type_2 +
+#                             season(period = "week", order = 3, type = "multiplicative") +
+#                             season(period = "year", order = 10, type = "multiplicative")))
+# 
+
+
+
+# Generate the future dataframe
+merged_future <- new_data(merged_full_selected,28)
+
+last_sell_prices <- merged_data %>%
+  group_by(item_id) %>%
+  summarise(sell_price = last(sell_price))
+
+# Merge the last known 'sell_price' into merged_future
+merged_future <- merged_future |>
+  left_join(last_sell_prices, by = "item_id") |>
+  ungroup()  # Remove grouping
+
+
+# Convert categorical variables to dummy variables
+calendar_dummies <- fastDummies::dummy_cols(calendar %>%
+  mutate(across(c("event_name_1", "event_name_2", "event_type_1", "event_type_2"), ~replace(., is.na(.), "None"))), select_columns = c("event_name_1", "event_type_1", "event_name_2", "event_type_2"))
+
+
+colnames(calendar_dummies) <- gsub(" ", "_", colnames(calendar_dummies))
+colnames(calendar_dummies) <- gsub("-", "_", colnames(calendar_dummies))
+colnames(calendar_dummies) <- gsub("'", "_", colnames(calendar_dummies))
+
+
+merged_future <- merged_future |> inner_join(calendar_dummies , by = "date")#%>% select(date,event_name_1,event_type_1,event_name_2,event_type_2,snap_TX)
+
+
+# glance(fit)
+write.csv(merged_future,"../Data/merged_future.csv", row.names=FALSE)
+
+
+# Forecast
+fc <- forecast(fit, new_data =  merged_future)
+
+fc |>
+  autoplot(merged_full_selected,level=NULL) +
+  labs(x = "Date", y = "Sales")
+
+```
+```{r}
+print(head(merged_full_selected))
+```
+```{r}
+#Check metrics with test
+sales_test_validation_long <- sales_test_validation %>%
+  pivot_longer(cols = -id, names_to = "date", values_to = "sales") %>%
+  mutate(date = as.Date("2011-01-29") + as.integer(str_remove(date, "d_")) - 1) %>%
+  rename(item_id = id) %>%
+  mutate(item_id = str_remove(item_id, "_TX_3_validation"))%>%
+  as_tsibble(key = item_id, index = date)
+
+# Assuming 'fc' is your forecast object
+metrics <- fc %>%
+  accuracy(sales_test_validation_long) %>%
+  group_by(item_id) %>%
+  summarise(
+    mae = mean(MAE, na.rm = TRUE),
+    mse = mean(mse, na.rm = TRUE),
+    rmse = mean(rmse, na.rm = TRUE)
+  )
+
+write.csv(sales_test_validation_long,"../Data/sales_test_validation_long.csv", row.names=FALSE)
+
+metrics <- fc |> accuracy(sales_test_validation_long)
+write.csv(metrics,"../Data/metrics_prophet.csv", row.names=FALSE)
+
+```
+
+```{r}
+
+```
+
+```{r}
+fc |>
+  autoplot(merged_full_selected,level=NULL) +
+  labs(x = "Date", y = "Sales")
+```
+
+```{r}
+
+```
+
+```{r}
+fit |>
+  components() |>
+  autoplot()
+```
+```{r}
+
+fit |> filter(item_id == "FOODS_3_464")|>gg_tsresiduals()
+
+```
+
+```{r}
+library(dplyr)
+library(lubridate)
+
+
+merged_future <- new_data(merged_full_selected,28)|>
+  mutate(
+    snap_TX = ifelse(day(date) %in% c(1, 3, 5, 6, 7, 9, 11, 12, 13, 15), 1, 0)
+    )  # Set 'snap' to 1 on snap days, 0 otherwise,
+
+last_sell_prices <- merged_data %>%
+  group_by(item_id) %>%
+  summarise(last_sell_price = last(sell_price))
+
+# Merge the last known 'sell_price' into merged_future
+merged_future <- merged_future |>
+  left_join(last_sell_prices, by = "item_id") |>
+  ungroup()  # Remove grouping
+```
+
+
+```{r}
+fc |>
+  filter(item_id == "FOODS_3_416")|>
+  autoplot(
+    merged_full_selected,
+    level = NULL
+  ) +
+  labs(y = "Trips ('000)") 
+```
+
+
+```{r}
+max_date_per_item <- sales_train_validation_long %>%
+  group_by(item_id) %>%
+  summarise(max_date = max(date))
+print(max_date_per_item)
+
+days_per_item <- sales_train_validation_long %>%
+  group_by(item_id) %>%
+  summarise(number_of_days = n_distinct(date))
+print(days_per_item)
+```
 
 
 
@@ -1017,10 +1389,6 @@ Dots (Outliers): Data points that fall outside the range of the whiskers.
 
 
 #!||||||||||||||||||||||||||||||||||||||||||||||||||
-
-```{r}
-
-```
 
 
 Heatmap for sales per day Mon-Sun per month:
