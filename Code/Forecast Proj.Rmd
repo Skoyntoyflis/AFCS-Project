@@ -81,8 +81,10 @@ library(forecast)
 library(stats)
 library(ggplot2)
 library(fable)
+library(fable.prophet)
 library(fabletools)
 library(cowplot)
+library(fastDummies)
 ```
 
 
@@ -187,6 +189,32 @@ plot <- sales_selected %>%
 
 plot
 ```
+
+```{r}
+#50 random items, more clear info
+set.seed(10)  # Set seed for reproducibility
+random_items <- sample(unique(merged_data$item_id), 10)
+
+prices_selected <- merged_data %>%
+  filter(item_id %in% random_items)%>%
+  mutate(sell_price = ifelse(is.na(sell_price), 0, sell_price))# %>%
+  # select(id, starts_with("d_")) %>%  
+  # pivot_longer(starts_with("d_"), names_to = "dates", values_to = "sales") %>%
+  # mutate(dates = as.integer(str_remove(dates, "d_")))
+
+plot <- prices_selected %>%
+  plot_ly(x = ~date, y = ~sell_price, color = ~item_id, type = 'scatter', mode = 'lines') %>%
+  layout(title = "Sales Over Time for 50 random items",
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "prices"),
+         showlegend = TRUE,
+         colorway = "Set3")
+
+plot
+
+```
+
+
 
 By plotting the daily sales for each item we observe that there are many low values with some seemingly random spikes. These spikes, if they were random or similar to white noise would make our forecasts difficult. Another challenge is that not all products are available every day; some have gaps in their records, others start or stop being offered at different times in the studied period. For that reason we investigate further, using the calendar dataset which reveals information that might affect sales, such as annual events or promotions.
 
@@ -1169,9 +1197,9 @@ fc
 
 
 ```{r}
-library(fable.prophet)
-library(fastDummies)
-#50 random items, more clear info
+#50 random items - forecasting with prophet
+
+
 set.seed(123)  # Set seed for reproducibility
 random_items <- sample(unique(merged_data$item_id), 50)
 
@@ -1182,14 +1210,16 @@ random_items <- sample(unique(merged_data$item_id), 50)
 merged_full_selected <- fastDummies::dummy_cols(merged_data %>%
   mutate(across(c("event_name_1", "event_name_2", "event_type_1", "event_type_2"), ~replace(., is.na(.), "None"))), select_columns = c("event_name_1", "event_type_1", "event_name_2", "event_type_2")) %>%
   filter(item_id %in% random_items) %>%
-  as_tsibble(key = item_id, index = date)
+  as_tsibble(key = item_id, index = date) %>%
+  mutate(sell_price = ifelse(is.na(sell_price), 0, sell_price))
+
 
 
 colnames(merged_full_selected) <- gsub(" ", "_", colnames(merged_full_selected))
 colnames(merged_full_selected) <- gsub("-", "_", colnames(merged_full_selected))
 colnames(merged_full_selected) <- gsub("'", "_", colnames(merged_full_selected))
 
-write.csv(merged_full_selected,"../Data/merged_full_selected.csv", row.names=FALSE)
+# write.csv(merged_full_selected,"../Data/merged_full_selected.csv", row.names=FALSE)
 
 
 # Select only dummy variables
@@ -1212,7 +1242,7 @@ regressor_string <- paste(dummy_cols, collapse = " + ")
 # print(regressor_string)
 
 # Include the string in the formula
-sales_formula <- formula(paste("sales ~ snap_TX + ", regressor_string,
+sales_formula <- formula(paste("sales ~ sell_price + snap_TX + ", regressor_string,
                                "+ season(period = 'week', order = 3, type = 'multiplicative')",
                                "+ season(period = 'year', order = 10, type = 'multiplicative')"))
 # print(regressor_string)
@@ -1223,27 +1253,19 @@ fit <- merged_full_selected |>
 
 
 
-# 
-# # Fit the model
-# fit <- merged_full_selected |>
-#   model(prophet = prophet(sales ~ snap_TX + event_name_1 + event_type_1 + event_name_2 + event_type_2 +
-#                             season(period = "week", order = 3, type = "multiplicative") +
-#                             season(period = "year", order = 10, type = "multiplicative")))
-# 
-
-
-
 # Generate the future dataframe
-merged_future <- new_data(merged_full_selected,28)
+merged_future <- new_data(merged_full_selected, 28)
 
-last_sell_prices <- merged_data %>%
-  group_by(item_id) %>%
-  summarise(sell_price = last(sell_price))
+# Get wm_yr_wk
+merged_future <- merged_future %>%
+  left_join(calendar %>% select(wm_yr_wk, date), by = c("date"))
 
-# Merge the last known 'sell_price' into merged_future
-merged_future <- merged_future |>
-  left_join(last_sell_prices, by = "item_id") |>
-  ungroup()  # Remove grouping
+
+# Merge prices by wm_yr_wk, item_id
+merged_future <- merged_future %>%
+  left_join(sell_prices %>% select(wm_yr_wk, item_id, sell_price), by = c("wm_yr_wk", "item_id")) %>%
+  mutate(sell_price = ifelse(is.na(sell_price), 0, sell_price))
+
 
 
 # Convert categorical variables to dummy variables
@@ -1265,15 +1287,13 @@ write.csv(merged_future,"../Data/merged_future.csv", row.names=FALSE)
 
 # Forecast
 fc <- forecast(fit, new_data =  merged_future)
-
-fc |>
-  autoplot(merged_full_selected,level=NULL) +
-  labs(x = "Date", y = "Sales")
+# 
+# fc |>
+#   autoplot(merged_full_selected,level=NULL) +
+#   labs(x = "Date", y = "Sales")
 
 ```
-```{r}
-print(head(merged_full_selected))
-```
+
 ```{r}
 #Check metrics with test
 sales_test_validation_long <- sales_test_validation %>%
@@ -1283,34 +1303,166 @@ sales_test_validation_long <- sales_test_validation %>%
   mutate(item_id = str_remove(item_id, "_TX_3_validation"))%>%
   as_tsibble(key = item_id, index = date)
 
-# Assuming 'fc' is your forecast object
-metrics <- fc %>%
+
+metrics_by_product <- fc %>%
   accuracy(sales_test_validation_long) %>%
   group_by(item_id) %>%
   summarise(
     mae = mean(MAE, na.rm = TRUE),
-    mse = mean(mse, na.rm = TRUE),
-    rmse = mean(rmse, na.rm = TRUE)
+    acf1 = mean(ACF1, na.rm = TRUE),
+    rmse = mean(RMSE, na.rm = TRUE)
   )
+
+metrics <- fc %>%
+  accuracy(sales_test_validation_long) %>%
+  summarise(
+    mae = mean(MAE, na.rm = TRUE),
+    acf1 = mean(ACF1, na.rm = TRUE),
+    rmse = mean(RMSE, na.rm = TRUE)
+  )
+
 
 write.csv(sales_test_validation_long,"../Data/sales_test_validation_long.csv", row.names=FALSE)
 
-metrics <- fc |> accuracy(sales_test_validation_long)
+# metrics <- fc |> accuracy(sales_test_validation_long)
 write.csv(metrics,"../Data/metrics_prophet.csv", row.names=FALSE)
+write.csv(metrics_by_product,"../Data/metrics_by_product_prophet.csv", row.names=FALSE)
 
 ```
 
 ```{r}
+#ALL items - forecasting with prophet
+
+
+# set.seed(123)  # Set seed for reproducibility
+# random_items <- sample(unique(merged_data$item_id), 50)
+# 
+
+
+# Convert categorical variables to dummy variables
+merged_full_all <- fastDummies::dummy_cols(merged_data %>%  mutate(across(c("event_name_1", "event_name_2", "event_type_1", "event_type_2"), ~replace(., is.na(.), "None"))), select_columns = c("event_name_1", "event_type_1", "event_name_2", "event_type_2")) %>%
+  as_tsibble(key = item_id, index = date) %>%
+  mutate(sell_price = ifelse(is.na(sell_price), 0, sell_price))
+  # filter(item_id %in% randmerged_full_all) %>%
+
+
+colnames(merged_full_all) <- gsub(" ", "_", colnames(merged_full_all))
+colnames(merged_full_all) <- gsub("-", "_", colnames(merged_full_all))
+colnames(merged_full_all) <- gsub("'", "_", colnames(merged_full_all))
+
+# write.csv(merged_full_all,"../Data/merged_full_all.csv", row.names=FALSE)
+
+
+# Select only dummy variables
+dummy_vars <- select(merged_full_all, starts_with("event_name_1_"), starts_with("event_type_1_"), starts_with("event_name_2_"), starts_with("event_type_2_"))
+
+# Exclude date and item_id columns
+dummy_vars <- dummy_vars[, !colnames(dummy_vars) %in% c("date", "item_id")]
+
+colnames(dummy_vars) <- str_trim(colnames(dummy_vars))
+
+dummy_cols <- colnames(dummy_vars)
+# print(dummy_cols)
+
+# Escape column names with spaces
+dummy_cols <- paste0("`", dummy_cols, "`")
+
+
+# Create the string format
+regressor_string <- paste(dummy_cols, collapse = " + ")
+# print(regressor_string)
+
+# Include the string in the formula
+sales_formula <- formula(paste("sales ~ sell_price + snap_TX + ", regressor_string,
+                               "+ season(period = 'week', order = 3, type = 'multiplicative')",
+                               "+ season(period = 'year', order = 10, type = 'multiplicative')"))
+# print(regressor_string)
+# Fit the model
+fit <- merged_full_all |>
+  model(prophet = prophet(sales_formula))
+
+
+
+
+# Generate the future dataframe
+merged_future_all <- new_data(merged_full_all, 28)
+
+# Get wm_yr_wk
+merged_future_all <- merged_future_all %>%
+  left_join(calendar %>% select(wm_yr_wk, date), by = c("date"))
+
+
+# Merge prices by wm_yr_wk, item_id
+merged_future_all <- merged_future_all %>%
+  left_join(sell_prices %>% select(wm_yr_wk, item_id, sell_price), by = c("wm_yr_wk", "item_id")) %>%
+  mutate(sell_price = ifelse(is.na(sell_price), 0, sell_price))
+
+
+
+# Convert categorical variables to dummy variables
+calendar_dummies <- fastDummies::dummy_cols(calendar %>%
+  mutate(across(c("event_name_1", "event_name_2", "event_type_1", "event_type_2"), ~replace(., is.na(.), "None"))), select_columns = c("event_name_1", "event_type_1", "event_name_2", "event_type_2"))
+
+
+colnames(calendar_dummies) <- gsub(" ", "_", colnames(calendar_dummies))
+colnames(calendar_dummies) <- gsub("-", "_", colnames(calendar_dummies))
+colnames(calendar_dummies) <- gsub("'", "_", colnames(calendar_dummies))
+
+
+merged_future_all <- merged_future_all |> inner_join(calendar_dummies , by = "date")#%>% select(date,event_name_1,event_type_1,event_name_2,event_type_2,snap_TX)
+
+
+# glance(fit)
+write.csv(merged_future_all,"../Data/merged_future_all.csv", row.names=FALSE)
+
+
+# Forecast
+fc <- forecast(fit, new_data =  merged_future_all)
+
+write.csv(fc,"../Data/fc_all.csv", row.names=FALSE)
+
+
+# fc |>
+#   autoplot(merged_full_selected,level=NULL) +
+#   labs(x = "Date", y = "Sales")
 
 ```
 
-```{r}
-fc |>
-  autoplot(merged_full_selected,level=NULL) +
-  labs(x = "Date", y = "Sales")
-```
+
 
 ```{r}
+#Check metrics with test - ALL
+sales_test_validation_long <- sales_test_validation %>%
+  pivot_longer(cols = -id, names_to = "date", values_to = "sales") %>%
+  mutate(date = as.Date("2011-01-29") + as.integer(str_remove(date, "d_")) - 1) %>%
+  rename(item_id = id) %>%
+  mutate(item_id = str_remove(item_id, "_TX_3_validation"))%>%
+  as_tsibble(key = item_id, index = date)
+
+
+metrics_by_product <- fc %>%
+  accuracy(sales_test_validation_long) %>%
+  group_by(item_id) %>%
+  summarise(
+    mae = mean(MAE, na.rm = TRUE),
+    acf1 = mean(ACF1, na.rm = TRUE),
+    rmse = mean(RMSE, na.rm = TRUE)
+  )
+
+metrics <- fc %>%
+  accuracy(sales_test_validation_long) %>%
+  summarise(
+    mae = mean(MAE, na.rm = TRUE),
+    acf1 = mean(ACF1, na.rm = TRUE),
+    rmse = mean(RMSE, na.rm = TRUE)
+  )
+
+
+write.csv(sales_test_validation_long,"../Data/sales_test_validation_long.csv", row.names=FALSE)
+
+# metrics <- fc |> accuracy(sales_test_validation_long)
+write.csv(metrics,"../Data/metrics_prophet_all.csv", row.names=FALSE)
+write.csv(metrics_by_product,"../Data/metrics_by_product_prophet_all.csv", row.names=FALSE)
 
 ```
 
