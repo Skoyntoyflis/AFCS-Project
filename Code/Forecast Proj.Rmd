@@ -1282,7 +1282,7 @@ merged_future <- merged_future |> inner_join(calendar_dummies , by = "date")#%>%
 
 
 # glance(fit)
-write.csv(merged_future,"../Data/merged_future.csv", row.names=FALSE)
+# write.csv(merged_future,"../Data/merged_future.csv", row.names=FALSE)
 
 
 # Forecast
@@ -1322,11 +1322,11 @@ metrics <- fc %>%
   )
 
 
-write.csv(sales_test_validation_long,"../Data/sales_test_validation_long.csv", row.names=FALSE)
+# write.csv(sales_test_validation_long,"../Data/sales_test_validation_long.csv", row.names=FALSE)
 
-# metrics <- fc |> accuracy(sales_test_validation_long)
-write.csv(metrics,"../Data/metrics_prophet.csv", row.names=FALSE)
-write.csv(metrics_by_product,"../Data/metrics_by_product_prophet.csv", row.names=FALSE)
+metrics <- fc |> accuracy(sales_test_validation_long)
+# write.csv(metrics,"../Data/metrics_prophet.csv", row.names=FALSE)
+# write.csv(metrics_by_product,"../Data/metrics_by_product_prophet.csv", row.names=FALSE)
 
 ```
 
