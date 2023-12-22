@@ -1,0 +1,961 @@
+---
+title: "AFCS proj"
+output: html_document
+date: "2023-12-05"
+---
+```{r, echo=FALSE}
+# library(vroom)
+# library(stringr)
+# library(dplyr)
+# library(tidyverse)
+# library(kableExtra)
+# library(plotly)
+# library(zoo)
+# library(ggthemes)
+# library(ggplot2)
+# library(gridExtra)
+# library(lubridate)
+# library(fpp3)
+# library(ggridges)
+# library(cowplot)
+# library(anytime)
+```
+
+```{r}
+# # general visualisation
+# library('ggplot2') # visualisation
+# library('scales') # visualisation
+# library('patchwork') # visualisation
+# library('RColorBrewer') # visualisation
+# library('corrplot') # visualisation
+# 
+# # general data manipulation
+# library('dplyr') # data manipulation
+# library('readr') # input/output
+# library('vroom') # input/output
+# library('skimr') # overview
+# library('tibble') # data wrangling
+# library('tidyr') # data wrangling
+# library('purrr') # data wrangling
+# library('stringr') # string manipulation
+# library('forcats') # factor manipulation
+# library('fuzzyjoin') # data wrangling
+# library(tidyverse)
+# 
+# 
+# # specific visualisation
+# library('alluvial') # visualisation
+# library('ggrepel') # visualisation
+# library('ggforce') # visualisation
+# library('ggridges') # visualisation
+# library('gganimate') # animations
+# library('GGally') # visualisation
+# library('ggthemes') # visualisation
+# library('wesanderson') # visualisation
+# library('kableExtra') # display
+# 
+# # Date + forecast
+# library('lubridate') # date and time
+# library('forecast') # time series analysis
+# #library('prophet') # time series analysis
+# library('timetk') # time series analysis
+# 
+# # Interactivity
+# library('crosstalk')
+# library('plotly')
+# 
+# # parallel
+# library('foreach')
+# library('doParallel')
+```
+
+
+```{r}
+library('plotly')
+library('ggridges')
+library('ggplot2')
+library('scales')
+library('patchwork') 
+library('RColorBrewer')
+library('corrplot')
+library('stringr')
+library('vroom') 
+library(fpp3)
+library(latex2exp)
+library(rmarkdown)
+library(skimr)
+library(dplyr)
+library(tsibble)
+library(forecast)
+library(stats)
+library(ggplot2)
+library(fable)
+library(fable.prophet)
+library(fabletools)
+library(cowplot)
+library(fastDummies)
+library(modeltime)
+
+```
+
+
+
+Quick loading the datasets
+```{r}
+#---------------------LOAD DATASETS---------------------
+path = 'C:/Users/dimcp/Documents/AFCS-Project/Data/'
+
+sell_prices <- vroom(str_c(path,"sell_prices_afcs2023.csv"), delim = ",", col_types = cols())
+
+sales_train_validation <- vroom(str_c(path,"sales_train_validation_afcs2023.csv"), delim = ",", col_types = cols())
+
+calendar <- vroom(str_c(path,"calendar_afcs2023.csv"), delim = ",", col_types = cols())
+
+sales_test_validation <- vroom(str_c(path,"sales_test_validation_afcs2022.csv"), delim = ",", col_types = cols())
+
+samples_submission <- vroom(str_c(path,"sample_submission_afcs2023.csv"), delim = ",", col_types = cols())
+
+```
+
+```{r}
+extract_ts <- function(df){
+  min_date <- as.Date("2011-01-29") #lowest data, corresponds to d_1
+  df %>%
+    select(id, starts_with("d_")) %>%   #take the id of the item and the daily sales columns
+    pivot_longer(starts_with("d_"), names_to = "dates", values_to = "sales") %>%     #reshape
+    mutate(dates = as.integer(str_remove(dates, "d_"))) %>%   
+    mutate(dates = min_date + dates - 1) %>%         #turn day numbers into dates
+    mutate(id = str_remove(id, "_validation"))       #remove end of item id
+}
+```
+
+Merging happens here. First merge the calendar and sales_train to keep sales for every day for each item.
+```{r}
+# summary(sales_train_validation)
+#change column names from d_1 to dates
+#also fix item_id
+sales_train_validation_long <- sales_train_validation %>%
+  pivot_longer(cols = -id, names_to = "date", values_to = "sales") %>%
+  mutate(date = as.Date("2011-01-29") + as.integer(str_remove(date, "d_")) - 1) %>%
+  rename(item_id = id) %>%
+  mutate(item_id = str_remove(item_id, "_TX_3_validation"))
+# summary(sales_train_validation_long)
+```
+
+Now merge the above with the sell_prices. We should now have the daily data for each item's price and sales.
+```{r}
+calendar <- calendar %>%
+  mutate(date = as.Date(date, format = "%m/%d/%Y"))
+
+result <- merge(calendar, sales_train_validation_long, by = "date", all.x = TRUE)
+result <- result %>%
+  arrange(date, item_id)
+
+merged_data <- result %>%
+  left_join(sell_prices %>% select(wm_yr_wk, item_id, sell_price), by = c("wm_yr_wk", "item_id"))|>
+  filter(!is.na(sales),!is.infinite(sales))
+
+summary(merged_data)
+
+
+```
+
+
+
+
+#!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Forecasting from now on
+
+
+
+```{r}
+#50 random items - forecasting with prophet
+
+
+set.seed(123)  # Set seed for reproducibility
+random_items <- sample(unique(merged_data$item_id), 5)
+
+
+
+# Convert categorical variables to dummy variables
+
+merged_full_selected <- fastDummies::dummy_cols(merged_data %>%
+  mutate(across(c("event_name_1", "event_name_2", "event_type_1", "event_type_2"), ~replace(., is.na(.), "None"))), select_columns = c("event_name_1", "event_type_1", "event_name_2", "event_type_2")) %>%
+  filter(item_id %in% random_items) %>%
+  as_tsibble(key = item_id, index = date) %>%
+  mutate(sell_price = ifelse(is.na(sell_price), 0, sell_price))
+
+
+
+colnames(merged_full_selected) <- gsub(" ", "_", colnames(merged_full_selected))
+colnames(merged_full_selected) <- gsub("-", "_", colnames(merged_full_selected))
+colnames(merged_full_selected) <- gsub("'", "_", colnames(merged_full_selected))
+
+# write.csv(merged_full_selected,"../Data/merged_full_selected.csv", row.names=FALSE)
+
+
+# Select only dummy variables
+dummy_vars <- select(merged_full_selected, starts_with("event_name_1_"), starts_with("event_type_1_"), starts_with("event_name_2_"), starts_with("event_type_2_"))
+
+# Exclude date and item_id columns
+dummy_vars <- dummy_vars[, !colnames(dummy_vars) %in% c("date", "item_id")]
+
+colnames(dummy_vars) <- str_trim(colnames(dummy_vars))
+
+dummy_cols <- colnames(dummy_vars)
+# print(dummy_cols)
+
+# Escape column names with spaces
+dummy_cols <- paste0("`", dummy_cols, "`")
+
+
+# Create the string format
+regressor_string <- paste(dummy_cols, collapse = " + ")
+# print(regressor_string)
+
+# Include the string in the formula
+sales_formula <- formula(paste("sales ~ sell_price + snap_TX + ", regressor_string,
+                               "+ season(period = 'week', order = 3, type = 'additive')",
+                               "+ season(period = 'year', order = 10, type = 'additive')"))
+# print(regressor_string)
+# Fit the model
+fit <- merged_full_selected |>
+  model(prophet = prophet(sales_formula))
+
+
+
+
+# Generate the future dataframe
+merged_future <- new_data(merged_full_selected, 28)
+
+# Get wm_yr_wk
+merged_future <- merged_future %>%
+  left_join(calendar %>% select(wm_yr_wk, date), by = c("date"))
+
+
+# Merge prices by wm_yr_wk, item_id
+merged_future <- merged_future %>%
+  left_join(sell_prices %>% select(wm_yr_wk, item_id, sell_price), by = c("wm_yr_wk", "item_id")) %>%
+  mutate(sell_price = ifelse(is.na(sell_price), 0, sell_price))
+
+
+
+# Convert categorical variables to dummy variables
+calendar_dummies <- fastDummies::dummy_cols(calendar %>%
+  mutate(across(c("event_name_1", "event_name_2", "event_type_1", "event_type_2"), ~replace(., is.na(.), "None"))), select_columns = c("event_name_1", "event_type_1", "event_name_2", "event_type_2"))
+
+
+colnames(calendar_dummies) <- gsub(" ", "_", colnames(calendar_dummies))
+colnames(calendar_dummies) <- gsub("-", "_", colnames(calendar_dummies))
+colnames(calendar_dummies) <- gsub("'", "_", colnames(calendar_dummies))
+
+
+merged_future <- merged_future |> inner_join(calendar_dummies , by = "date")#%>% select(date,event_name_1,event_type_1,event_name_2,event_type_2,snap_TX)
+
+
+# glance(fit)
+# write.csv(merged_future,"../Data/merged_future.csv", row.names=FALSE)
+
+
+# Forecast
+fc <- forecast(fit, new_data =  merged_future)
+# 
+# fc |>
+#   autoplot(merged_full_selected,level=NULL) +
+#   labs(x = "Date", y = "Sales")
+
+```
+
+```{r}
+
+
+#Check metrics with test
+sales_test_validation_long <- sales_test_validation %>%
+  pivot_longer(cols = -id, names_to = "date", values_to = "sales") %>%
+  mutate(date = as.Date("2011-01-29") + as.integer(str_remove(date, "d_")) - 1) %>%
+  rename(item_id = id) %>%
+  mutate(item_id = str_remove(item_id, "_TX_3_validation"))%>%
+  as_tsibble(key = item_id, index = date)|>
+  filter(item_id %in% random_items)
+
+
+metrics_by_product <- fc %>%
+  accuracy(sales_test_validation_long) %>%
+  group_by(item_id) %>%
+  summarise(
+    mae = mean(MAE, na.rm = TRUE),
+    acf1 = mean(ACF1, na.rm = TRUE),
+    rmse = mean(RMSE, na.rm = TRUE)
+  )
+
+metrics <- fc %>%
+  accuracy(sales_test_validation_long) %>%
+  summarise(
+    mae = mean(MAE, na.rm = TRUE),
+    acf1 = mean(ACF1, na.rm = TRUE),
+    rmse = mean(RMSE, na.rm = TRUE)
+  )
+
+# round the predictions
+prediction_data <- fc %>%
+  select(.mean, sales, item_id, date) %>%
+  mutate(.mean = pmax(.mean, 0),  # Replace negative values with 0
+         rounded_predictions = round(.mean)) %>%
+  as_tsibble(index = date, key = item_id)
+
+
+# Calculate RMSE with rounded predictions
+calculate_rmse <- function(pred_tsibble, true_tsibble) {
+  # Assuming the tsibble has a column named 'value' for both predicted and true values
+  pred_df <- as.data.frame(pred_tsibble)
+  true_df <- as.data.frame(true_tsibble)
+  
+  # Make sure the order is the same
+  pred_df <- pred_df[order(pred_df$date, pred_df$item_id), ]
+  true_df <- true_df[order(true_df$date, true_df$item_id), ]
+  
+  # Extract values
+  pred_values <- as.vector(pred_df$rounded_predictions)
+  true_values <- as.vector(true_df$sales)
+  
+  # Calculate RMSE
+  rmse <- sqrt(mean((pred_values - true_values)^2, na.rm = TRUE))
+  
+  return(rmse)
+}
+
+rmse_result_rounded <- calculate_rmse(prediction_data, sales_test_validation_long)
+
+# Add rmse_result_rounded to metrics
+metrics <- metrics %>%
+  add_column(
+    rmse_rounded = rmse_result_rounded
+  )
+
+# write.csv(sales_test_validation_long,"../Data/sales_test_validation_long.csv", row.names=FALSE)
+
+# metrics <- fc |> accuracy(sales_test_validation_long)
+# write.csv(metrics,"../Data/metrics_prophet.csv", row.names=FALSE)
+# write.csv(metrics_by_product,"../Data/metrics_by_product_prophet.csv", row.names=FALSE)
+
+```
+
+
+```{r}
+# Create submission csv
+prediction_data <- fc %>%
+  select(.mean, sales, item_id, date) %>%
+  mutate(.mean = pmax(.mean, 0),  # Replace negative values with 0
+         rounded_predictions = round(.mean)) %>%
+  as_tsibble(index = date, key = item_id)
+
+
+# Convert to data frame and drop the 'mean' and 'sales' columns
+prediction_df <- as.data.frame(prediction_data)
+prediction_df <- prediction_df[, !(names(prediction_df) %in% c(".mean", "sales"))]
+
+wide_prediction <- prediction_df %>%
+  spread(key = "item_id", value = "rounded_predictions")
+
+# Transpose the table
+wide_prediction <- as.data.frame(t(wide_prediction))
+
+# Optionally, rename the columns
+colnames(wide_prediction) <- c(paste0("F", 1:28))
+wide_prediction <- wide_prediction[-1, ]
+wide_prediction$id <- rownames(wide_prediction)
+# Add "_TX_3_validation" to each ID
+wide_prediction$id <- paste0(wide_prediction$id, "_TX_3_validation")
+# Move the last column to the first
+wide_prediction <- wide_prediction[, c(ncol(wide_prediction), 1:(ncol(wide_prediction)-1))]
+#Reset index
+rownames(wide_prediction) <- NULL
+```
+
+```{r}
+# fc |>filter(item_id=="FOODS_3_349")|>
+#   autoplot(merged_full_selected,level=90) +
+#   labs(x = "Date", y = "Sales")
+```
+
+
+
+```{r}
+#ALL items - forecasting with prophet
+
+
+# set.seed(123)  # Set seed for reproducibility
+# random_items <- sample(unique(merged_data$item_id), 50)
+# 
+
+
+# Convert categorical variables to dummy variables
+merged_full_all <- fastDummies::dummy_cols(merged_data %>%  mutate(across(c("event_name_1", "event_name_2", "event_type_1", "event_type_2"), ~replace(., is.na(.), "None"))), select_columns = c("event_name_1", "event_type_1", "event_name_2", "event_type_2")) %>%
+  as_tsibble(key = item_id, index = date) %>%
+  mutate(sell_price = ifelse(is.na(sell_price), 0, sell_price))
+  # filter(item_id %in% randmerged_full_all) %>%
+
+
+colnames(merged_full_all) <- gsub(" ", "_", colnames(merged_full_all))
+colnames(merged_full_all) <- gsub("-", "_", colnames(merged_full_all))
+colnames(merged_full_all) <- gsub("'", "_", colnames(merged_full_all))
+
+# write.csv(merged_full_all,"../Data/merged_full_all.csv", row.names=FALSE)
+
+
+# Select only dummy variables
+dummy_vars <- select(merged_full_all, starts_with("event_name_1_"), starts_with("event_type_1_"), starts_with("event_name_2_"), starts_with("event_type_2_"))
+
+# Exclude date and item_id columns
+dummy_vars <- dummy_vars[, !colnames(dummy_vars) %in% c("date", "item_id")]
+
+colnames(dummy_vars) <- str_trim(colnames(dummy_vars))
+
+dummy_cols <- colnames(dummy_vars)
+# print(dummy_cols)
+
+# Escape column names with spaces
+dummy_cols <- paste0("`", dummy_cols, "`")
+
+
+# Create the string format
+regressor_string <- paste(dummy_cols, collapse = " + ")
+# print(regressor_string)
+
+# Include the string in the formula
+sales_formula <- formula(paste("sqrt(sales) ~ sell_price + snap_TX + ", regressor_string,
+                               "+ season(period = 'week', order = 10, type = 'additive')",
+                               "+ season(period = 'year', order = 10, type = 'additive')"))
+# print(regressor_string)
+# Fit the model
+fit <- merged_full_all |>
+  model(prophet = prophet(sales_formula))
+
+
+
+
+# Generate the future dataframe
+merged_future_all <- new_data(merged_full_all, 28)
+
+# Get wm_yr_wk
+merged_future_all <- merged_future_all %>%
+  left_join(calendar %>% select(wm_yr_wk, date), by = c("date"))
+
+
+# Merge prices by wm_yr_wk, item_id
+merged_future_all <- merged_future_all %>%
+  left_join(sell_prices %>% select(wm_yr_wk, item_id, sell_price), by = c("wm_yr_wk", "item_id")) %>%
+  mutate(sell_price = ifelse(is.na(sell_price), 0, sell_price))
+
+
+
+# Convert categorical variables to dummy variables
+calendar_dummies <- fastDummies::dummy_cols(calendar %>%
+  mutate(across(c("event_name_1", "event_name_2", "event_type_1", "event_type_2"), ~replace(., is.na(.), "None"))), select_columns = c("event_name_1", "event_type_1", "event_name_2", "event_type_2"))
+
+
+colnames(calendar_dummies) <- gsub(" ", "_", colnames(calendar_dummies))
+colnames(calendar_dummies) <- gsub("-", "_", colnames(calendar_dummies))
+colnames(calendar_dummies) <- gsub("'", "_", colnames(calendar_dummies))
+
+
+merged_future_all <- merged_future_all |> inner_join(calendar_dummies , by = "date")#%>% select(date,event_name_1,event_type_1,event_name_2,event_type_2,snap_TX)
+
+
+# glance(fit)
+write.csv(merged_future_all,"../Data/merged_future_all.csv", row.names=FALSE)
+
+
+# Forecast
+fc <- forecast(fit, new_data =  merged_future_all)
+
+write.csv(fc,"../Data/fc_all.csv", row.names=FALSE)
+
+
+# fc |>
+#   autoplot(merged_full_selected,level=NULL) +
+#   labs(x = "Date", y = "Sales")
+
+```
+
+
+
+```{r}
+
+#Check metrics with test
+sales_test_validation_long <- sales_test_validation %>%
+  pivot_longer(cols = -id, names_to = "date", values_to = "sales") %>%
+  mutate(date = as.Date("2011-01-29") + as.integer(str_remove(date, "d_")) - 1) %>%
+  rename(item_id = id) %>%
+  mutate(item_id = str_remove(item_id, "_TX_3_validation"))%>%
+  as_tsibble(key = item_id, index = date)#|>
+  # filter(item_id %in% random_items)
+
+
+metrics_by_product <- fc %>%
+  accuracy(sales_test_validation_long) %>%
+  group_by(item_id) %>%
+  summarise(
+    mae = mean(MAE, na.rm = TRUE),
+    acf1 = mean(ACF1, na.rm = TRUE),
+    rmse = mean(RMSE, na.rm = TRUE)
+  )
+
+metrics <- fc %>%
+  accuracy(sales_test_validation_long) %>%
+  summarise(
+    mae = mean(MAE, na.rm = TRUE),
+    acf1 = mean(ACF1, na.rm = TRUE),
+    rmse = mean(RMSE, na.rm = TRUE)
+  )
+
+# round the predictions
+prediction_data <- fc %>%
+  select(.mean, sales, item_id, date) %>%
+  mutate(.mean = pmax(.mean, 0),  # Replace negative values with 0
+         rounded_predictions = round(.mean)) %>%
+  as_tsibble(index = date, key = item_id)
+
+
+# Calculate RMSE with rounded predictions
+calculate_rmse <- function(pred_tsibble, true_tsibble) {
+  # Assuming the tsibble has a column named 'value' for both predicted and true values
+  pred_df <- as.data.frame(pred_tsibble)
+  true_df <- as.data.frame(true_tsibble)
+  
+  # Make sure the order is the same
+  pred_df <- pred_df[order(pred_df$date, pred_df$item_id), ]
+  true_df <- true_df[order(true_df$date, true_df$item_id), ]
+  
+  # Extract values
+  pred_values <- as.vector(pred_df$rounded_predictions)
+  true_values <- as.vector(true_df$sales)
+  
+  # Calculate RMSE
+  rmse <- sqrt(mean((pred_values - true_values)^2, na.rm = TRUE))
+  
+  return(rmse)
+}
+
+rmse_result_rounded <- calculate_rmse(prediction_data, sales_test_validation_long)
+
+# Add rmse_result_rounded to metrics
+metrics <- metrics %>%
+  add_column(
+    rmse_rounded = rmse_result_rounded
+  )
+
+# write.csv(sales_test_validation_long,"../Data/sales_test_validation_long.csv", row.names=FALSE)
+
+# metrics <- fc |> accuracy(sales_test_validation_long)
+write.csv(metrics,"../Data/metrics_prophet_all_additive.csv", row.names=FALSE)
+write.csv(metrics_by_product,"../Data/metrics_by_product_prophet_all_additive.csv", row.names=FALSE)
+
+```
+
+```{r}
+# Create submission csv
+prediction_data <- fc %>%
+  select(.mean, sales, item_id, date) %>%
+  mutate(.mean = pmax(.mean, 0),  # Replace negative values with 0
+         rounded_predictions = round(.mean)) %>%
+  as_tsibble(index = date, key = item_id)
+
+
+# Convert to data frame and drop the 'mean' and 'sales' columns
+prediction_df <- as.data.frame(prediction_data)
+prediction_df <- prediction_df[, !(names(prediction_df) %in% c(".mean", "sales"))]
+
+wide_prediction <- prediction_df %>%
+  spread(key = "item_id", value = "rounded_predictions")
+
+# Transpose the table
+wide_prediction <- as.data.frame(t(wide_prediction))
+
+# Optionally, rename the columns
+colnames(wide_prediction) <- c(paste0("F", 1:28))
+wide_prediction <- wide_prediction[-1, ]
+wide_prediction$id <- rownames(wide_prediction)
+# Add "_TX_3_validation" to each ID
+wide_prediction$id <- paste0(wide_prediction$id, "_TX_3_validation")
+# Move the last column to the first
+wide_prediction <- wide_prediction[, c(ncol(wide_prediction), 1:(ncol(wide_prediction)-1))]
+#Reset index
+rownames(wide_prediction) <- NULL
+
+write.csv(wide_prediction,"../Data/wide_prediction_all_additive.csv", row.names=FALSE)
+
+```
+
+
+<!-- ```{r} -->
+<!-- fit |> -->
+<!--   components() |> -->
+<!--   autoplot() -->
+<!-- ``` -->
+<!-- ```{r} -->
+
+<!-- fit |> filter(item_id == "FOODS_3_464")|>gg_tsresiduals() -->
+
+<!-- ``` -->
+
+
+
+#!!!!!!!!!!!!!!!!!! DHR
+
+
+```{r}
+set.seed(123)  # Set seed for reproducibility
+random_items <- sample(unique(merged_data$item_id), 5)
+
+
+# Convert categorical variables to dummy variables
+
+merged_full_selected <- fastDummies::dummy_cols(merged_data %>%
+  mutate(across(c("event_name_1", "event_name_2", "event_type_1", "event_type_2"), ~replace(., is.na(.), "None"))), select_columns = c("event_name_1", "event_type_1", "event_name_2", "event_type_2")) %>%
+  filter(item_id %in% random_items) %>%
+  as_tsibble(key = item_id, index = date) %>%
+  mutate(sell_price = ifelse(is.na(sell_price), 0, sell_price))
+
+colnames (merged_full_selected) <- gsub(" ", "_", colnames (merged_full_selected))
+colnames (merged_full_selected) <- gsub ("-" ,"_", colnames (merged_full_selected))
+colnames (merged_full_selected) <- gsub ("'", "_", colnames (merged_full_selected))
+
+
+sales_selected <- merged_full_selected |>
+  mutate(t = row_number()) |>
+  update_tsibble(index = t, regular = TRUE)
+
+# Select only dummy variables
+dummy_vars <- select(merged_full_selected, starts_with("event_name_1_"), starts_with("event_type_1_"), starts_with("event_name_2_"), starts_with("event_type_2_"))
+
+# Exclude date and item_id columns
+dummy_vars <- dummy_vars[, !colnames(dummy_vars) %in% c("date", "item_id")]
+
+colnames(dummy_vars) <- str_trim(colnames(dummy_vars))
+
+dummy_cols <- colnames(dummy_vars)
+# print(dummy_cols)
+
+# Escape column names with spaces
+dummy_cols <- paste0("`", dummy_cols, "`")
+
+
+# Create the string format
+regressor_string <- paste(dummy_cols, collapse = " + ")
+# print(regressor_string)
+# 
+
+# # Include the string in the formula
+# sales_formula <- formula(paste("sales ~ sell_price + snap_TX + ", regressor_string,
+#                                "+ season(period = 'week', order = 3, type = 'additive')",
+#                                "+ season(period = 'year', order = 10, type = 'additive')"))
+
+
+
+# # Fit the model
+# fit <- merged_full_selected |>
+#   model(prophet = prophet(sales_formula))
+
+
+# Include the string in the formula
+sales_formula <- formula(paste("sqrt(sales) ~ sell_price + snap_TX + ", regressor_string,
+                               "+ PDQ(0, 0, 0)", "+ pdq(d = 0)",
+                               "+ fourier(period = 7, K = 3)",
+                                "+ fourier(period = 365, K = 20)"))
+
+
+# print(sales_formula)
+
+
+fit <- merged_full_selected |>
+  model(
+    dhr = ARIMA(sales_formula))
+
+
+
+
+
+
+
+# Generate the future dataframe
+merged_future <- new_data(merged_full_selected, 28)
+
+# Get wm_yr_wk
+merged_future <- merged_future %>%
+  left_join(calendar %>% select(wm_yr_wk, date), by = c("date"))
+
+
+# Merge prices by wm_yr_wk, item_id
+merged_future <- merged_future %>%
+  left_join(sell_prices %>% select(wm_yr_wk, item_id, sell_price), by = c("wm_yr_wk", "item_id")) %>%
+  mutate(sell_price = ifelse(is.na(sell_price), 0, sell_price))
+
+
+
+# Convert categorical variables to dummy variables
+calendar_dummies <- fastDummies::dummy_cols(calendar %>%
+  mutate(across(c("event_name_1", "event_name_2", "event_type_1", "event_type_2"), ~replace(., is.na(.), "None"))), select_columns = c("event_name_1", "event_type_1", "event_name_2", "event_type_2"))
+
+
+colnames(calendar_dummies) <- gsub(" ", "_", colnames(calendar_dummies))
+colnames(calendar_dummies) <- gsub("-", "_", colnames(calendar_dummies))
+colnames(calendar_dummies) <- gsub("'", "_", colnames(calendar_dummies))
+
+
+merged_future <- merged_future |> inner_join(calendar_dummies , by = "date")#%>% select(date,event_name_1,event_type_1,event_name_2,event_type_2,snap_TX)
+
+
+# glance(fit)
+# write.csv(merged_future,"../Data/merged_future.csv", row.names=FALSE)
+
+
+# Forecast
+fc <- forecast(fit, new_data =  merged_future)
+# 
+
+```
+
+
+```{r}
+
+
+#Check metrics with test
+sales_test_validation_long <- sales_test_validation %>%
+  pivot_longer(cols = -id, names_to = "date", values_to = "sales") %>%
+  mutate(date = as.Date("2011-01-29") + as.integer(str_remove(date, "d_")) - 1) %>%
+  rename(item_id = id) %>%
+  mutate(item_id = str_remove(item_id, "_TX_3_validation"))%>%
+  as_tsibble(key = item_id, index = date)|>
+  filter(item_id %in% random_items)
+
+
+metrics_by_product <- fc %>%
+  accuracy(sales_test_validation_long) %>%
+  group_by(item_id) %>%
+  summarise(
+    mae = mean(MAE, na.rm = TRUE),
+    acf1 = mean(ACF1, na.rm = TRUE),
+    rmse = mean(RMSE, na.rm = TRUE)
+  )
+
+metrics <- fc %>%
+  accuracy(sales_test_validation_long) %>%
+  summarise(
+    mae = mean(MAE, na.rm = TRUE),
+    acf1 = mean(ACF1, na.rm = TRUE),
+    rmse = mean(RMSE, na.rm = TRUE)
+  )
+
+# round the predictions
+prediction_data <- fc %>%
+  select(.mean, sales, item_id, date) %>%
+  mutate(.mean = pmax(.mean, 0),  # Replace negative values with 0
+         rounded_predictions = round(.mean)) %>%
+  as_tsibble(index = date, key = item_id)
+
+
+# Calculate RMSE with rounded predictions
+calculate_rmse <- function(pred_tsibble, true_tsibble) {
+  # Assuming the tsibble has a column named 'value' for both predicted and true values
+  pred_df <- as.data.frame(pred_tsibble)
+  true_df <- as.data.frame(true_tsibble)
+  
+  # Make sure the order is the same
+  pred_df <- pred_df[order(pred_df$date, pred_df$item_id), ]
+  true_df <- true_df[order(true_df$date, true_df$item_id), ]
+  
+  # Extract values
+  pred_values <- as.vector(pred_df$rounded_predictions)
+  true_values <- as.vector(true_df$sales)
+  
+  # Calculate RMSE
+  rmse <- sqrt(mean((pred_values - true_values)^2, na.rm = TRUE))
+  
+  return(rmse)
+}
+
+rmse_result_rounded <- calculate_rmse(prediction_data, sales_test_validation_long)
+
+# Add rmse_result_rounded to metrics
+metrics <- metrics %>%
+  add_column(
+    rmse_rounded = rmse_result_rounded
+  )
+```
+
+
+#!!!!!!!!!! DHR ALL
+
+```{r}
+
+#ALL items - forecasting with DHR
+
+
+# set.seed(123)  # Set seed for reproducibility
+# random_items <- sample(unique(merged_data$item_id), 50)
+# 
+
+
+# Convert categorical variables to dummy variables
+merged_full_all <- fastDummies::dummy_cols(merged_data %>%  mutate(across(c("event_name_1", "event_name_2", "event_type_1", "event_type_2"), ~replace(., is.na(.), "None"))), select_columns = c("event_name_1", "event_type_1", "event_name_2", "event_type_2")) %>%
+  as_tsibble(key = item_id, index = date) %>%
+  mutate(sell_price = ifelse(is.na(sell_price), 0, sell_price))
+  # filter(item_id %in% randmerged_full_all) %>%
+
+
+colnames(merged_full_all) <- gsub(" ", "_", colnames(merged_full_all))
+colnames(merged_full_all) <- gsub("-", "_", colnames(merged_full_all))
+colnames(merged_full_all) <- gsub("'", "_", colnames(merged_full_all))
+
+# write.csv(merged_full_all,"../Data/merged_full_all.csv", row.names=FALSE)
+
+
+# Select only dummy variables
+dummy_vars <- select(merged_full_all, starts_with("event_name_1_"), starts_with("event_type_1_"), starts_with("event_name_2_"), starts_with("event_type_2_"))
+
+# Exclude date and item_id columns
+dummy_vars <- dummy_vars[, !colnames(dummy_vars) %in% c("date", "item_id")]
+
+colnames(dummy_vars) <- str_trim(colnames(dummy_vars))
+
+dummy_cols <- colnames(dummy_vars)
+# print(dummy_cols)
+
+# Escape column names with spaces
+dummy_cols <- paste0("`", dummy_cols, "`")
+
+
+# Create the string format
+regressor_string <- paste(dummy_cols, collapse = " + ")
+# print(regressor_string)
+
+
+
+# Include the string in the formula
+sales_formula <- formula(paste("sqrt(sales) ~ sell_price + snap_TX + ", regressor_string,
+                               "+ PDQ(0, 0, 0)", "+ pdq(d = 0)",
+                               "+ fourier(period = 7, K = 3)",
+                                "+ fourier(period = 365, K = 20)"))
+
+
+
+
+fit <- merged_full_all |>
+  model(
+    dhr = ARIMA(sales_formula))
+
+
+
+# Generate the future dataframe
+merged_future_all <- new_data(merged_full_all, 28)
+
+# Get wm_yr_wk
+merged_future_all <- merged_future_all %>%
+  left_join(calendar %>% select(wm_yr_wk, date), by = c("date"))
+
+
+# Merge prices by wm_yr_wk, item_id
+merged_future_all <- merged_future_all %>%
+  left_join(sell_prices %>% select(wm_yr_wk, item_id, sell_price), by = c("wm_yr_wk", "item_id")) %>%
+  mutate(sell_price = ifelse(is.na(sell_price), 0, sell_price))
+
+
+
+# Convert categorical variables to dummy variables
+calendar_dummies <- fastDummies::dummy_cols(calendar %>%
+  mutate(across(c("event_name_1", "event_name_2", "event_type_1", "event_type_2"), ~replace(., is.na(.), "None"))), select_columns = c("event_name_1", "event_type_1", "event_name_2", "event_type_2"))
+
+
+colnames(calendar_dummies) <- gsub(" ", "_", colnames(calendar_dummies))
+colnames(calendar_dummies) <- gsub("-", "_", colnames(calendar_dummies))
+colnames(calendar_dummies) <- gsub("'", "_", colnames(calendar_dummies))
+
+
+merged_future_all <- merged_future_all |> inner_join(calendar_dummies , by = "date")#%>% select(date,event_name_1,event_type_1,event_name_2,event_type_2,snap_TX)
+
+
+# glance(fit)
+write.csv(merged_future_all,"../Data/merged_future_all_DHR.csv", row.names=FALSE)
+
+
+# Forecast
+fc <- forecast(fit, new_data =  merged_future_all)
+
+write.csv(fc,"../Data/fc_all_DHR.csv", row.names=FALSE)
+
+
+```
+
+```{r}
+#Check metrics with test
+sales_test_validation_long <- sales_test_validation %>%
+  pivot_longer(cols = -id, names_to = "date", values_to = "sales") %>%
+  mutate(date = as.Date("2011-01-29") + as.integer(str_remove(date, "d_")) - 1) %>%
+  rename(item_id = id) %>%
+  mutate(item_id = str_remove(item_id, "_TX_3_validation"))%>%
+  as_tsibble(key = item_id, index = date)#|>
+  # filter(item_id %in% random_items)
+
+
+metrics_by_product <- fc %>%
+  accuracy(sales_test_validation_long) %>%
+  group_by(item_id) %>%
+  summarise(
+    mae = mean(MAE, na.rm = TRUE),
+    acf1 = mean(ACF1, na.rm = TRUE),
+    rmse = mean(RMSE, na.rm = TRUE)
+  )
+
+metrics <- fc %>%
+  accuracy(sales_test_validation_long) %>%
+  summarise(
+    mae = mean(MAE, na.rm = TRUE),
+    acf1 = mean(ACF1, na.rm = TRUE),
+    rmse = mean(RMSE, na.rm = TRUE)
+  )
+
+# round the predictions
+prediction_data <- fc %>%
+  select(.mean, sales, item_id, date) %>%
+  mutate(.mean = pmax(.mean, 0),  # Replace negative values with 0
+         rounded_predictions = round(.mean)) %>%
+  as_tsibble(index = date, key = item_id)
+
+
+# Calculate RMSE with rounded predictions
+calculate_rmse <- function(pred_tsibble, true_tsibble) {
+  # Assuming the tsibble has a column named 'value' for both predicted and true values
+  pred_df <- as.data.frame(pred_tsibble)
+  true_df <- as.data.frame(true_tsibble)
+  
+  # Make sure the order is the same
+  pred_df <- pred_df[order(pred_df$date, pred_df$item_id), ]
+  true_df <- true_df[order(true_df$date, true_df$item_id), ]
+  
+  # Extract values
+  pred_values <- as.vector(pred_df$rounded_predictions)
+  true_values <- as.vector(true_df$sales)
+  
+  # Calculate RMSE
+  rmse <- sqrt(mean((pred_values - true_values)^2, na.rm = TRUE))
+  
+  return(rmse)
+}
+
+rmse_result_rounded <- calculate_rmse(prediction_data, sales_test_validation_long)
+
+# Add rmse_result_rounded to metrics
+metrics <- metrics %>%
+  add_column(
+    rmse_rounded = rmse_result_rounded
+  )
+
+# write.csv(sales_test_validation_long,"../Data/sales_test_validation_long.csv", row.names=FALSE)
+
+# metrics <- fc |> accuracy(sales_test_validation_long)
+write.csv(metrics,"../Data/metrics_DHR_all.csv", row.names=FALSE)
+write.csv(metrics_by_product,"../Data/metrics_by_product_DHR_all.csv", row.names=FALSE)
+
+```
+
+

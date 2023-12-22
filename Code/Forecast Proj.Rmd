@@ -71,6 +71,8 @@ library('doParallel')
 
 
 ```{r}
+library('stringr') # string manipulation
+library('vroom') # input/output
 library(fpp3)
 library(latex2exp)
 library(rmarkdown)
@@ -85,6 +87,8 @@ library(fable.prophet)
 library(fabletools)
 library(cowplot)
 library(fastDummies)
+library(modeltime)
+
 ```
 
 
@@ -102,7 +106,7 @@ calendar <- vroom(str_c(path,"calendar_afcs2023.csv"), delim = ",", col_types = 
 
 sales_test_validation <- vroom(str_c(path,"sales_test_validation_afcs2022.csv"), delim = ",", col_types = cols())
 
-#samples_submission <- vroom(str_c(path,"sample_submission_afcs2023.csv"), delim = ",", col_types = cols())
+samples_submission <- vroom(str_c(path,"sample_submission_afcs2023.csv"), delim = ",", col_types = cols())
 
 ```
 
@@ -228,7 +232,7 @@ sales_train_validation_long <- sales_train_validation %>%
   mutate(date = as.Date("2011-01-29") + as.integer(str_remove(date, "d_")) - 1) %>%
   rename(item_id = id) %>%
   mutate(item_id = str_remove(item_id, "_TX_3_validation"))
-summary(sales_train_validation_long)
+# summary(sales_train_validation_long)
 ```
 
 Now merge the above with the sell_prices. We should now have the daily data for each item's price and sales.
@@ -244,19 +248,10 @@ merged_data <- result %>%
   left_join(sell_prices %>% select(wm_yr_wk, item_id, sell_price), by = c("wm_yr_wk", "item_id"))|>
   filter(!is.na(sales),!is.infinite(sales))
 
-summary(merged_data) 
-
-
-```
-
-```{r}
 summary(merged_data)
 
+
 ```
-
-
-
-
 
 
 
@@ -285,10 +280,10 @@ write.csv(merged_data,"../Data/merged_data.csv", row.names=FALSE)
 
 
 ```{r}
-# Filter out rows where sales and sell_price are not NA
-# Load the merged data
+# # Filter out rows where sales and sell_price are not NA
+# # Load the merged data
 merged_data2 <- read.csv("../Data/merged_data.csv")
-#cleaned_data <- merged_data2 %>% filter(!is.na(sales)  & is.na(sell_price))
+cleaned_data <- merged_data2 %>% filter(!is.na(sales)  & is.na(sell_price))
 summary(merged_data2)
 
 ```
@@ -303,7 +298,7 @@ summary(merged_data2)
 merged_data2 <- merged_data2 %>%
   mutate(
     date = as.Date(date),
-    wm_yr_wk = as.double(wm_yr_w/k),
+    wm_yr_wk = as.double(wm_yr_wk),
     weekday = as.character(weekday),
     wday = as.double(wday),
     month = as.double(month),
@@ -317,10 +312,10 @@ merged_data2 <- merged_data2 %>%
     sales = as.double(sales),
     sell_price = as.double(sell_price)
   )
-
-# Check the data types
-str(merged_data2)
-ts_data <- as_tsibble(merged_data2, index = date, key = item_id)
+# 
+# # Check the data types
+# str(merged_data2)
+# ts_data <- as_tsibble(merged_data2, index = date, key = item_id)
 ```
 
 
@@ -331,10 +326,10 @@ ts_data <- as_tsibble(merged_data2, index = date, key = item_id)
 
 ```{r}
 # Calculate overall correlation for all products
-overall_correlation <- cor(merged_data2$sales, merged_data2$sell_price, use = "complete.obs")
+overall_correlation <- cor(merged_data$sales, merged_data$sell_price, use = "complete.obs")
 
 
-correlation_by_product <- merged_data2 %>%
+correlation_by_product <- merged_data %>%
   group_by(item_id) %>%
   filter(complete.cases(sales, sell_price)) %>%
   summarize(correlation = cor(sales, sell_price))|>arrange(correlation)
@@ -535,8 +530,6 @@ ggplot(combined_data, aes(x = item_id, y = correlation, fill = item_id)) +
 
 ```{r}
 
-
-# Assuming merged_data2 is your data frame with sales, sell_price, and other relevant columns
 # Convert date to week to identify changes on a weekly basis
 merged_data2 <- merged_data2 %>%
   mutate(week = lubridate::week(date))
@@ -568,8 +561,10 @@ print(top_sales_change_products)
 
 #top_sales_change_products|>arrange(desc(sales_change))|>print()
 ```
+
+
+
 ```{r}
-# Assuming merged_data2 is your data frame with sales, sell_price, and other relevant columns
 # Convert date to week to identify changes on a weekly basis
 merged_data2 <- merged_data2 %>%
   mutate(week = lubridate::week(date))
@@ -611,7 +606,7 @@ print(average_sales_price_ratio)
 
 ```{r}
 # Load the merged data
-merged_data <- read.csv("merged_data.csv")
+# merged_data <- read.csv("../Data/merged_data.csv")
 
 # Replace missing values with NA
 merged_data$sell_price[merged_data$sell_price == "NA"] <- NA
@@ -683,38 +678,145 @@ str(cleaned_data)
 ```
 
 
-
+#!!!! Basic price EDA below
 
 ```{r}
-library(dplyr)
-
-# Group by item_id
-grouped_data <- cleaned_data %>%
-  group_by(item_id) %>%
-  summarise(always_zero_sales = all(sales == 0))
-
-# Identify item_ids that always have sales as 0
-item_ids_always_zero_sales <- grouped_data %>%
-  filter(always_zero_sales) %>%
-  pull(item_id)
-
-# Print or further analyze the results
-print(item_ids_always_zero_sales)
-# Filter cleaned_data for item_ids with always zero sales
-subset_data <- cleaned_data %>%
-  filter(item_id %in% item_ids_always_zero_sales)
-
-# Check summary statistics
-summary(subset_data)
+# library(dplyr)
+# 
+# # Group by item_id
+# grouped_data <- cleaned_data %>%
+#   group_by(item_id) %>%
+#   summarise(always_zero_sales = all(sales == 0))
+# 
+# # Identify item_ids that always have sales as 0
+# item_ids_always_zero_sales <- grouped_data %>%
+#   filter(always_zero_sales) %>%
+#   pull(item_id)
+# 
+# # Print or further analyze the results
+# # print(item_ids_always_zero_sales)
+# # Filter cleaned_data for item_ids with always zero sales
+# subset_data <- cleaned_data %>%
+#   filter(item_id %in% item_ids_always_zero_sales)
+# 
+# # Check summary statistics
+# summary(subset_data)
 
 ```
 
 
 
+```{r}
 
+stat_train <- sales_train_validation %>% 
+  #sample_n(50) %>%   
+  select(id, starts_with("d_")) %>% 
+  mutate(id = str_replace(id, "_validation", ""))
+
+
+
+stat_mean <- stat_train %>% 
+  mutate(across(starts_with("d_"), ~na_if(., 0))) %>% 
+  mutate(mean = rowMeans(select(., starts_with("d_")), na.rm = TRUE)) %>% 
+  select(id, mean)
+
+stat_zero <- stat_train %>% 
+  select(-contains("id")) %>% 
+  mutate(across(everything(), ~na_if(., 0))) %>% 
+  is.na() %>% 
+  as_tibble() %>% 
+  mutate(sum = rowSums(select(., everything()), na.rm = TRUE)) %>% 
+  mutate(mean = sum / (ncol(stat_train) - 1)) %>% 
+  select(sum, mean)
+  
+stat_prices <- sell_prices %>% 
+  unite(col = "id", item_id, store_id, sep  = "_") %>%
+  semi_join(stat_train, by = "id")
+```
 
 
 ```{r}
+p1 <- stat_zero %>% 
+  ggplot(aes(mean)) +
+  geom_density(fill = "blue", bw = 0.02) +
+  scale_x_continuous(labels = scales::percent) +
+  coord_cartesian(xlim = c(0, 1)) +
+  theme_hc() +
+  theme(axis.text.y = element_blank()) +
+  labs(x = "", y = "", title = "a) Density: Percentage of zero values")
+
+# p2 <- stat_mean %>% 
+#   ggplot(aes(mean)) +
+#   geom_density(fill = "red", bw = 0.03) +
+#   scale_x_log10(breaks = c(1, 2, 5, 10, 20)) +
+#   theme_hc() +
+#   theme(axis.text.y = element_blank()) +
+#   labs(x = "Sales", y = "", title = "Density: Mean sales (w/o zeros; log scale)")
+
+# foo <- stat_prices %>% 
+#   distinct(id, sell_price) %>% 
+#   group_by(id) %>% 
+#   summarise(mean_price = mean(sell_price),
+#             min_price = min(sell_price),
+#             max_price = max(sell_price)) %>%
+#   mutate(var_price = (max_price - min_price)/ mean_price)
+
+foo <- stat_prices %>% 
+  distinct(id, sell_price) %>% 
+  group_by(id) %>% 
+  summarise(mean_price = mean(sell_price),
+            min_price = min(sell_price),
+            max_price = max(sell_price),
+            ct = n()) %>%
+  mutate(var_price = (max_price - min_price)/ mean_price)# %>% 
+  # separate(id, into = c("cat", "dept", "item", "state", "store"), sep = "_")
+
+p2 <- foo %>% 
+  ggplot(aes(ct)) +
+#  geom_boxplot() +
+#  geom_jitter(height = 0.1) +
+  scale_x_log10(breaks = c(1, 2, 5, 10, 20)) +
+  geom_density(fill = "red",bw = 0.2, alpha = 0.5) +
+  theme_hc() +
+  theme(legend.position = "bottom") +
+  labs( x = "",y = "", fill = "", title = "b) Density: Number of Price changes")
+
+p3 <- foo %>% 
+  ggplot(aes(mean_price)) +
+  geom_density(fill = "darkgreen")  +
+  theme_hc() +
+  theme(axis.text.y = element_blank(), legend.position = "none") +
+  labs(x = "Price [$]", y = "", title = "c) Density: Mean item price")
+
+p4 <- foo %>% 
+  ggplot(aes(var_price)) +
+  geom_density(fill = "green3")  +
+  scale_x_continuous(labels = scales::percent) +
+  coord_cartesian(xlim = c(0, 2)) +
+  theme_hc() +
+  theme(axis.text.y = element_blank(), legend.position = "none") +
+  labs(x = "", y = "", title = "d) Density: Normalised price variations")
+
+jpeg(file="../Figures/general_price_stats.png",width = 700,height = 700)
+(p1 + p2) / (p3 + p4)
+dev.off()
+```
+
+```{r}
+mean_price <- foo$mean_price
+mean_price_all_items <- mean(mean_price)
+```
+
+Regarding prices, we first plot some general statistics about the data. On plot 1 a) we can see that most of the items do not have a price during large periods in the dataset. This is possibly because not all food items are available throughout the year. In plot 1b),though, we can see that in the 5 years time period not a lot of price changes occur, with normalised price variations peaking at about 10% (plot 1d)), and a mean item price of 2.72$.
+
+
+
+Regarding prices, the exploratory data analysis (EDA) reveals notable patterns. In Plot 1a), a significant portion of items exhibits a lack of pricing data for extended durations within the dataset. This phenomenon may be attributed to the intermittent availability of certain food items throughout the year.
+
+Moving on to Plot 1b), spanning the 5-year timeframe, it becomes evident that substantial fluctuations in item prices are infrequent and the normalized variations in prices, depicted in Plot 1d), reach peaks of approximately 10%. Additionally, the mean item price across the dataset is observed to be $2.72. These insights shed light on the temporal dynamics and stability within the pricing data, contributing valuable context to the broader understanding of the dataset.
+
+```{r}
+jpeg(file="../Figures/average_prices.png",width = 500,height = 500)
 sell_prices %>% 
   ggplot(aes(sell_price)) +
   geom_density(bw = 0.1, alpha = 0.5) +
@@ -724,10 +826,13 @@ sell_prices %>%
   theme_hc() +
   theme(legend.position = "bottom") +
   labs(x = "Average Sales Price [$]", y = "", 
-       title = "Item Prices vary by Category and Department",
-       subtitle = "But distributions are almost identical from State to State")
+       title = "Average Item Prices")
+
+dev.off()
+
 ```
 ```{r}
+jpeg(file="../Figures/number_price_changes.png",width = 700,height = 700)
 foo <- stat_prices %>% 
   distinct(id, sell_price) %>% 
   group_by(id) %>% 
@@ -746,16 +851,18 @@ p1 <- foo %>%
   geom_density(bw = 0.2, alpha = 0.5) +
   theme_hc() +
   theme(legend.position = "bottom") +
-  labs( fill = "", title = "# Price changes")
+  labs( fill = "", title = "Number of Price changes")
 
 p1
 
-  
+dev.off()
+
   
 
 ```
 
 ```{r}
+jpeg(file="../Figures/average_prices_yearly.png",width = 700,height = 700)
 library(anytime)
 foo <- sell_prices %>% 
   select(wm_yr_wk, sell_price) %>% 
@@ -781,10 +888,12 @@ foo %>%
   coord_cartesian(xlim = c(0.4, 30)) +
   theme(legend.position = "bottom") +
   labs(x = "Average Sales Price [$]", y = "",
-       title = "Item Prices stable over the years")
+       title = "Average Item Prices over the years")
+
+dev.off()
 ```
 
-
+#Study price changes to sales
 
 ```{r}
 #Get some examples to study
@@ -828,6 +937,7 @@ price_intervals <- example %>%
 
 
 ```{r}
+# jpeg(file="../Figures/3price_change_sales.png",width = 700,height = 700)
 p1 <- example %>% 
   filter(id == "FOODS_3_030_TX_3") %>% 
   select(id, dates, sales) %>% 
@@ -878,8 +988,14 @@ p3 <- example %>%
 
 p1 / p2 / p3 + plot_annotation(title = 'Price changes for 3 random items over full training period',
                                subtitle = "Line charts = sales curves. Background colour = sell price. Lighter colours = lower prices")
+
+# dev.off()
 ```
-We notice that when there is a gap in sales for a long period, and then the price changes, most of the time sales pick up too. (Keep in mind these are just examples).
+In order to undestand how prices influence sales, it is essential to see if price changes temporarily or for longer periods affect customer's buying habits.  The overall correlation between price changes and sales is $-0.1306$, indicating that when prices change, then a small decrease in sales is apparent, due to mostly price increases. In figure \ref{}, the sales for three example items are plotted, with the orange line representing the scaled prices. For some products, like "FOODS_3_030_TX_3" in 2013-2014, price changes infuence the sales significantly, while for others, like "FOODS_3_520_TX_3", consumers seem to buy in a steady rate, regardless of the price. Finally, it is noticeable that when there is a gap in sales for a long period, and then the price changes, most of the time sales pick up too.
+
+To comprehend the impact of prices on sales, it is crucial to investigate whether both short-term and prolonged alterations in pricing influence consumer purchasing behaviors. The overall correlation between price fluctuations and sales is observed to be $-0.1306$, indicating a modest decrease in sales predominantly associated with price increases.
+
+In Figure \ref{}, the sales dynamics for three exemplar items are illustrated, with the orange line representing scaled prices. Notably, certain products, such as "FOODS_3_030_TX_3" during 2013-2014, demonstrate a considerable influence of price changes on sales. Conversely, for other items like "FOODS_3_520_TX_3," consumer purchasing appears relatively stable, irrespective of price variations. Moreover, a noticeable trend emerges – when there is a prolonged absence in sales followed by a price change, sales tend to recover in the majority of cases. This analysis provides valuable insights into the nuanced relationship between pricing dynamics and consumer behavior within the dataset.
 
 ```{r}
 # start and end times for SNAP intervals
@@ -915,93 +1031,19 @@ gg <- example %>%
   ggplot(aes(dates, sales, group = id)) +
   #geom_rect(aes(xmin = snap_start, xmax = snap_end, ymin = 0, ymax = max_sales), fill = "grey90", na.rm = TRUE) +
   geom_line(aes(col = id), na.rm = TRUE) +
-  geom_line(aes(dates, rel_price), col = "orange", size = 3, alpha = 0.3, na.rm = TRUE) +
+  geom_line(aes(dates, rel_price), col = "orange", size = 1.5, alpha = 0.3, na.rm = TRUE) +
   #eom_point(aes(dates, has_event), na.rm = TRUE) +
   # coord_cartesian(xlim = c(date("2015-05-01"), date("2015-10-01"))) + 
   facet_wrap(~id, nrow = 3, scales = "free") +   
   theme_hc() +
   theme(legend.position = "none", strip.background = element_blank(), strip.text = element_text(size = 10),
         panel.spacing = unit(1, "lines"), plot.title = element_text(size = 10)) +
-  labs(x = "", y = "Sales", title = "Interactive Sales + Explanatory Features\nGrey = SNAP. Black = Events. Orange = Scaled Price.")
+  labs(x = "", y = "Sales", title = "Sales + Prices for 3 items\nOrange = Scaled Price.")
 
 ggplotly(gg, dynamicTicks = TRUE)
 ```
 
 
-```{r}
-
-stat_train <- sales_train_validation %>% 
-  #sample_n(50) %>%   
-  select(id, starts_with("d_")) %>% 
-  mutate(id = str_replace(id, "_validation", ""))
-
-
-
-stat_mean <- stat_train %>% 
-  mutate(across(starts_with("d_"), ~na_if(., 0))) %>% 
-  mutate(mean = rowMeans(select(., starts_with("d_")), na.rm = TRUE)) %>% 
-  select(id, mean)
-
-stat_zero <- stat_train %>% 
-  select(-contains("id")) %>% 
-  mutate(across(everything(), ~na_if(., 0))) %>% 
-  is.na() %>% 
-  as_tibble() %>% 
-  mutate(sum = rowSums(select(., everything()), na.rm = TRUE)) %>% 
-  mutate(mean = sum / (ncol(stat_train) - 1)) %>% 
-  select(sum, mean)
-  
-stat_prices <- sell_prices %>% 
-  unite(col = "id", item_id, store_id, sep  = "_") %>%
-  semi_join(stat_train, by = "id")
-```
-
-
-```{r}
-p1 <- stat_zero %>% 
-  ggplot(aes(mean)) +
-  geom_density(fill = "blue", bw = 0.02) +
-  scale_x_continuous(labels = scales::percent) +
-  coord_cartesian(xlim = c(0, 1)) +
-  theme_hc() +
-  theme(axis.text.y = element_blank()) +
-  labs(x = "", y = "", title = "Density: Percentage of zero values")
-
-p2 <- stat_mean %>% 
-  ggplot(aes(mean)) +
-  geom_density(fill = "red", bw = 0.03) +
-  scale_x_log10(breaks = c(1, 2, 5, 10, 20)) +
-  theme_hc() +
-  theme(axis.text.y = element_blank()) +
-  labs(x = "Sales", y = "", title = "Density: Mean sales (w/o zeros; log scale)")
-
-foo <- stat_prices %>% 
-  distinct(id, sell_price) %>% 
-  group_by(id) %>% 
-  summarise(mean_price = mean(sell_price),
-            min_price = min(sell_price),
-            max_price = max(sell_price)) %>%
-  mutate(var_price = (max_price - min_price)/ mean_price)
-
-p3 <- foo %>% 
-  ggplot(aes(mean_price)) +
-  geom_density(fill = "darkgreen")  +
-  theme_hc() +
-  theme(axis.text.y = element_blank(), legend.position = "none") +
-  labs(x = "Price [$]", y = "", title = "Density: Mean item price")
-
-p4 <- foo %>% 
-  ggplot(aes(var_price)) +
-  geom_density(fill = "green3")  +
-  scale_x_continuous(labels = scales::percent) +
-  coord_cartesian(xlim = c(0, 2)) +
-  theme_hc() +
-  theme(axis.text.y = element_blank(), legend.position = "none") +
-  labs(x = "", y = "", title = "Density: Normalised price variations")
-
-
-(p1 + p2) / (p3 + p4)
-```
 
 
 
@@ -1062,11 +1104,8 @@ random_items <- sample(unique(merged_data$item_id), 5)
 
 ```
 
-```{r}
-random_items
-```
 
-
+#!!!!!!!!!!!!!!!!!!! ARIMA BASIC
 ```{r}
 merged_full_selected <- merged_data |>
   filter(item_id %in% random_items) %>%
@@ -1083,7 +1122,7 @@ fc <- fit |>forecast(h = "28 days")
 
 ```{r}
 fc |>
-  filter(item_id == "FOODS_3_375")|>
+  filter(item_id == "FOODS_3_416")|>
   autoplot(
     merged_full_selected,
     level = NULL
@@ -1152,48 +1191,6 @@ fit |>
 str(merged_data)
 ```
 
-```{r}
-library(fable.prophet)
-
-merged_full_selected <- merged_data %>%
-  filter(item_id %in% random_items) %>%
-  as_tsibble(key = item_id, index = date)
-
-
-fit <- merged_full_selected |>
-  model(prophet = prophet(sales  ~  snap_TX + event_name_1 + event_type_1 + event_name_2 + event_type_2 +
-            season(period = "week", order = 3, type = "multiplicative") +
-            season(period = "year", order = 10, type = "multiplicative")))
-
-
-
-
-
-# Generate the future dataframe
-merged_future <- new_data(merged_full_selected,28)
-
-last_sell_prices <- merged_data %>%
-  group_by(item_id) %>%
-  summarise(sell_price = last(sell_price))
-
-# Merge the last known 'sell_price' into merged_future
-merged_future <- merged_future |>
-  left_join(last_sell_prices, by = "item_id") |>
-  ungroup()  # Remove grouping
-
-merged_future <- merged_future |> left_join(calendar %>% select(date,event_name_1,event_type_1,event_name_2,event_type_2,snap_TX), by = "date")
-
-
-# write.csv(merged_future,"../Data/merged_future.csv", row.names=FALSE)
-
-glance(fit)
-
-fc<-forecast(fit, new_data =  merged_future)
-
-fc
-
-
-```
 
 
 ```{r}
@@ -1201,7 +1198,7 @@ fc
 
 
 set.seed(123)  # Set seed for reproducibility
-random_items <- sample(unique(merged_data$item_id), 50)
+random_items <- sample(unique(merged_data$item_id), 5)
 
 
 
@@ -1295,13 +1292,16 @@ fc <- forecast(fit, new_data =  merged_future)
 ```
 
 ```{r}
+
+
 #Check metrics with test
 sales_test_validation_long <- sales_test_validation %>%
   pivot_longer(cols = -id, names_to = "date", values_to = "sales") %>%
   mutate(date = as.Date("2011-01-29") + as.integer(str_remove(date, "d_")) - 1) %>%
   rename(item_id = id) %>%
   mutate(item_id = str_remove(item_id, "_TX_3_validation"))%>%
-  as_tsibble(key = item_id, index = date)
+  as_tsibble(key = item_id, index = date)|>
+  filter(item_id %in% random_items)
 
 
 metrics_by_product <- fc %>%
@@ -1321,14 +1321,89 @@ metrics <- fc %>%
     rmse = mean(RMSE, na.rm = TRUE)
   )
 
+# round the predictions
+prediction_data <- fc %>%
+  select(.mean, sales, item_id, date) %>%
+  mutate(.mean = pmax(.mean, 0),  # Replace negative values with 0
+         rounded_predictions = round(.mean)) %>%
+  as_tsibble(index = date, key = item_id)
+
+
+# Calculate RMSE with rounded predictions
+calculate_rmse <- function(pred_tsibble, true_tsibble) {
+  # Assuming the tsibble has a column named 'value' for both predicted and true values
+  pred_df <- as.data.frame(pred_tsibble)
+  true_df <- as.data.frame(true_tsibble)
+  
+  # Make sure the order is the same
+  pred_df <- pred_df[order(pred_df$date, pred_df$item_id), ]
+  true_df <- true_df[order(true_df$date, true_df$item_id), ]
+  
+  # Extract values
+  pred_values <- as.vector(pred_df$rounded_predictions)
+  true_values <- as.vector(true_df$sales)
+  
+  # Calculate RMSE
+  rmse <- sqrt(mean((pred_values - true_values)^2, na.rm = TRUE))
+  
+  return(rmse)
+}
+
+rmse_result_rounded <- calculate_rmse(prediction_data, sales_test_validation_long)
+
+# Add rmse_result_rounded to metrics
+metrics <- metrics %>%
+  add_column(
+    rmse_rounded = rmse_result_rounded
+  )
 
 # write.csv(sales_test_validation_long,"../Data/sales_test_validation_long.csv", row.names=FALSE)
 
-metrics <- fc |> accuracy(sales_test_validation_long)
+# metrics <- fc |> accuracy(sales_test_validation_long)
 # write.csv(metrics,"../Data/metrics_prophet.csv", row.names=FALSE)
 # write.csv(metrics_by_product,"../Data/metrics_by_product_prophet.csv", row.names=FALSE)
 
 ```
+
+
+```{r}
+# Create submission csv
+prediction_data <- fc %>%
+  select(.mean, sales, item_id, date) %>%
+  mutate(.mean = pmax(.mean, 0),  # Replace negative values with 0
+         rounded_predictions = round(.mean)) %>%
+  as_tsibble(index = date, key = item_id)
+
+
+# Convert to data frame and drop the 'mean' and 'sales' columns
+prediction_df <- as.data.frame(prediction_data)
+prediction_df <- prediction_df[, !(names(prediction_df) %in% c(".mean", "sales"))]
+
+wide_prediction <- prediction_df %>%
+  spread(key = "item_id", value = "rounded_predictions")
+
+# Transpose the table
+wide_prediction <- as.data.frame(t(wide_prediction))
+
+# Optionally, rename the columns
+colnames(wide_prediction) <- c(paste0("F", 1:28))
+wide_prediction <- wide_prediction[-1, ]
+wide_prediction$id <- rownames(wide_prediction)
+# Add "_TX_3_validation" to each ID
+wide_prediction$id <- paste0(wide_prediction$id, "_TX_3_validation")
+# Move the last column to the first
+wide_prediction <- wide_prediction[, c(ncol(wide_prediction), 1:(ncol(wide_prediction)-1))]
+#Reset index
+rownames(wide_prediction) <- NULL
+```
+
+```{r}
+fc |>filter(item_id=="FOODS_3_349")|>
+  autoplot(merged_full_selected,level=90) +
+  labs(x = "Date", y = "Sales")
+```
+
+
 
 ```{r}
 #ALL items - forecasting with prophet
@@ -1374,7 +1449,7 @@ regressor_string <- paste(dummy_cols, collapse = " + ")
 
 # Include the string in the formula
 sales_formula <- formula(paste("sales ~ sell_price + snap_TX + ", regressor_string,
-                               "+ season(period = 'week', order = 3, type = 'multiplicative')",
+                               "+ season(period = 'week', order = 10, type = 'multiplicative')",
                                "+ season(period = 'year', order = 10, type = 'multiplicative')"))
 # print(regressor_string)
 # Fit the model
@@ -1431,13 +1506,15 @@ write.csv(fc,"../Data/fc_all.csv", row.names=FALSE)
 
 
 ```{r}
-#Check metrics with test - ALL
+
+#Check metrics with test
 sales_test_validation_long <- sales_test_validation %>%
   pivot_longer(cols = -id, names_to = "date", values_to = "sales") %>%
   mutate(date = as.Date("2011-01-29") + as.integer(str_remove(date, "d_")) - 1) %>%
   rename(item_id = id) %>%
   mutate(item_id = str_remove(item_id, "_TX_3_validation"))%>%
-  as_tsibble(key = item_id, index = date)
+  as_tsibble(key = item_id, index = date)#|>
+  # filter(item_id %in% random_items)
 
 
 metrics_by_product <- fc %>%
@@ -1457,14 +1534,84 @@ metrics <- fc %>%
     rmse = mean(RMSE, na.rm = TRUE)
   )
 
+# round the predictions
+prediction_data <- fc %>%
+  select(.mean, sales, item_id, date) %>%
+  mutate(.mean = pmax(.mean, 0),  # Replace negative values with 0
+         rounded_predictions = round(.mean)) %>%
+  as_tsibble(index = date, key = item_id)
 
-write.csv(sales_test_validation_long,"../Data/sales_test_validation_long.csv", row.names=FALSE)
+
+# Calculate RMSE with rounded predictions
+calculate_rmse <- function(pred_tsibble, true_tsibble) {
+  # Assuming the tsibble has a column named 'value' for both predicted and true values
+  pred_df <- as.data.frame(pred_tsibble)
+  true_df <- as.data.frame(true_tsibble)
+  
+  # Make sure the order is the same
+  pred_df <- pred_df[order(pred_df$date, pred_df$item_id), ]
+  true_df <- true_df[order(true_df$date, true_df$item_id), ]
+  
+  # Extract values
+  pred_values <- as.vector(pred_df$rounded_predictions)
+  true_values <- as.vector(true_df$sales)
+  
+  # Calculate RMSE
+  rmse <- sqrt(mean((pred_values - true_values)^2, na.rm = TRUE))
+  
+  return(rmse)
+}
+
+rmse_result_rounded <- calculate_rmse(prediction_data, sales_test_validation_long)
+
+# Add rmse_result_rounded to metrics
+metrics <- metrics %>%
+  add_column(
+    rmse_rounded = rmse_result_rounded
+  )
+
+# write.csv(sales_test_validation_long,"../Data/sales_test_validation_long.csv", row.names=FALSE)
 
 # metrics <- fc |> accuracy(sales_test_validation_long)
 write.csv(metrics,"../Data/metrics_prophet_all.csv", row.names=FALSE)
 write.csv(metrics_by_product,"../Data/metrics_by_product_prophet_all.csv", row.names=FALSE)
 
 ```
+
+```{r}
+# Create submission csv
+prediction_data <- fc %>%
+  select(.mean, sales, item_id, date) %>%
+  mutate(.mean = pmax(.mean, 0),  # Replace negative values with 0
+         rounded_predictions = round(.mean)) %>%
+  as_tsibble(index = date, key = item_id)
+
+
+# Convert to data frame and drop the 'mean' and 'sales' columns
+prediction_df <- as.data.frame(prediction_data)
+prediction_df <- prediction_df[, !(names(prediction_df) %in% c(".mean", "sales"))]
+
+wide_prediction <- prediction_df %>%
+  spread(key = "item_id", value = "rounded_predictions")
+
+# Transpose the table
+wide_prediction <- as.data.frame(t(wide_prediction))
+
+# Optionally, rename the columns
+colnames(wide_prediction) <- c(paste0("F", 1:28))
+wide_prediction <- wide_prediction[-1, ]
+wide_prediction$id <- rownames(wide_prediction)
+# Add "_TX_3_validation" to each ID
+wide_prediction$id <- paste0(wide_prediction$id, "_TX_3_validation")
+# Move the last column to the first
+wide_prediction <- wide_prediction[, c(ncol(wide_prediction), 1:(ncol(wide_prediction)-1))]
+#Reset index
+rownames(wide_prediction) <- NULL
+
+write.csv(wide_prediction,"../Data/wide_prediction_all.csv", row.names=FALSE)
+
+```
+
 
 ```{r}
 fit |>
