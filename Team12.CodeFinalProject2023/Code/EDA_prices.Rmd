@@ -1,0 +1,794 @@
+---
+title: "AFCS proj"
+output: html_document
+date: "2023-12-05"
+---
+```{r, echo=FALSE}
+# library(vroom)
+# library(stringr)
+# library(dplyr)
+# library(tidyverse)
+# library(kableExtra)
+# library(plotly)
+# library(zoo)
+# library(ggthemes)
+# library(ggplot2)
+# library(gridExtra)
+# library(lubridate)
+# library(fpp3)
+# library(ggridges)
+# library(cowplot)
+# library(anytime)
+```
+
+```{r}
+# # general visualisation
+# library('ggplot2') # visualisation
+# library('scales') # visualisation
+# library('patchwork') # visualisation
+# library('RColorBrewer') # visualisation
+# library('corrplot') # visualisation
+# 
+# # general data manipulation
+# library('dplyr') # data manipulation
+# library('readr') # input/output
+# library('vroom') # input/output
+# library('skimr') # overview
+# library('tibble') # data wrangling
+# library('tidyr') # data wrangling
+# library('purrr') # data wrangling
+# library('stringr') # string manipulation
+# library('forcats') # factor manipulation
+# library('fuzzyjoin') # data wrangling
+# library(tidyverse)
+# 
+# 
+# # specific visualisation
+# library('alluvial') # visualisation
+# library('ggrepel') # visualisation
+# library('ggforce') # visualisation
+# library('ggridges') # visualisation
+# library('gganimate') # animations
+# library('GGally') # visualisation
+# library('ggthemes') # visualisation
+# library('wesanderson') # visualisation
+# library('kableExtra') # display
+# 
+# # Date + forecast
+# library('lubridate') # date and time
+# library('forecast') # time series analysis
+# #library('prophet') # time series analysis
+# library('timetk') # time series analysis
+# 
+# # Interactivity
+# library('crosstalk')
+# library('plotly')
+# 
+# # parallel
+# library('foreach')
+# library('doParallel')
+```
+
+
+```{r}
+library('plotly')
+library('ggridges')
+library('ggplot2')
+library('scales')
+library('patchwork') 
+library('RColorBrewer')
+library('corrplot')
+library('stringr')
+library('vroom') 
+library(fpp3)
+library(latex2exp)
+library(rmarkdown)
+library(skimr)
+library(dplyr)
+library(tsibble)
+library(forecast)
+library(stats)
+library(ggplot2)
+library(fable)
+library(fable.prophet)
+library(fabletools)
+library(cowplot)
+library(fastDummies)
+library(modeltime)
+
+```
+
+
+
+Quick loading the datasets
+```{r}
+#---------------------LOAD DATASETS---------------------
+path = 'C:/Users/dimcp/Documents/AFCS-Project/Data/'
+
+sell_prices <- vroom(str_c(path,"sell_prices_afcs2023.csv"), delim = ",", col_types = cols())
+
+sales_train_validation <- vroom(str_c(path,"sales_train_validation_afcs2023.csv"), delim = ",", col_types = cols())
+
+calendar <- vroom(str_c(path,"calendar_afcs2023.csv"), delim = ",", col_types = cols())
+
+sales_test_validation <- vroom(str_c(path,"sales_test_validation_afcs2022.csv"), delim = ",", col_types = cols())
+
+samples_submission <- vroom(str_c(path,"sample_submission_afcs2023.csv"), delim = ",", col_types = cols())
+
+```
+
+```{r}
+extract_ts <- function(df){
+  min_date <- as.Date("2011-01-29") #lowest data, corresponds to d_1
+  df %>%
+    select(id, starts_with("d_")) %>%   #take the id of the item and the daily sales columns
+    pivot_longer(starts_with("d_"), names_to = "dates", values_to = "sales") %>%     #reshape
+    mutate(dates = as.integer(str_remove(dates, "d_"))) %>%   
+    mutate(dates = min_date + dates - 1) %>%         #turn day numbers into dates
+    mutate(id = str_remove(id, "_validation"))       #remove end of item id
+}
+```
+
+Merging happens here. First merge the calendar and sales_train to keep sales for every day for each item.
+```{r}
+# summary(sales_train_validation)
+#change column names from d_1 to dates
+#also fix item_id
+sales_train_validation_long <- sales_train_validation %>%
+  pivot_longer(cols = -id, names_to = "date", values_to = "sales") %>%
+  mutate(date = as.Date("2011-01-29") + as.integer(str_remove(date, "d_")) - 1) %>%
+  rename(item_id = id) %>%
+  mutate(item_id = str_remove(item_id, "_TX_3_validation"))
+# summary(sales_train_validation_long)
+```
+
+Now merge the above with the sell_prices. We should now have the daily data for each item's price and sales.
+```{r}
+calendar <- calendar %>%
+  mutate(date = as.Date(date, format = "%m/%d/%Y"))
+
+result <- merge(calendar, sales_train_validation_long, by = "date", all.x = TRUE)
+result <- result %>%
+  arrange(date, item_id)
+
+merged_data <- result %>%
+  left_join(sell_prices %>% select(wm_yr_wk, item_id, sell_price), by = c("wm_yr_wk", "item_id"))|>
+  filter(!is.na(sales),!is.infinite(sales))
+
+summary(merged_data)
+
+
+```
+
+
+
+#||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+
+```{r}
+write.csv(merged_data,"../Data/merged_data.csv", row.names=FALSE)
+```
+
+
+
+```{r}
+# # Filter out rows where sales and sell_price are not NA
+# # Load the merged data
+merged_data2 <- read.csv("../Data/merged_data.csv")
+cleaned_data <- merged_data2 %>% filter(!is.na(sales)  & is.na(sell_price))
+summary(merged_data2)
+
+```
+
+
+
+
+
+
+
+```{r}
+merged_data2 <- merged_data2 %>%
+  mutate(
+    date = as.Date(date),
+    wm_yr_wk = as.double(wm_yr_wk),
+    weekday = as.character(weekday),
+    wday = as.double(wday),
+    month = as.double(month),
+    year = as.double(year),
+    event_name_1 = as.character(event_name_1),
+    event_type_1 = as.character(event_type_1),
+    event_name_2 = as.character(event_name_2),
+    event_type_2 = as.character(event_type_2),
+    snap_TX = as.double(snap_TX),
+    item_id = as.character(item_id),
+    sales = as.double(sales),
+    sell_price = as.double(sell_price)
+  )
+# 
+# # Check the data types
+# str(merged_data2)
+# ts_data <- as_tsibble(merged_data2, index = date, key = item_id)
+```
+
+
+
+
+
+
+
+```{r}
+# Calculate overall correlation for all products
+overall_correlation <- cor(merged_data$sales, merged_data$sell_price, use = "complete.obs")
+
+
+correlation_by_product <- merged_data %>%
+  group_by(item_id) %>%
+  filter(complete.cases(sales, sell_price)) %>%
+  summarize(correlation = cor(sales, sell_price))|>arrange(correlation)
+```
+
+
+```{r}
+# Find the 5 products with the highest correlations
+top_corr_products <- correlation_by_product %>%
+  filter(!is.na(correlation)) %>%
+  arrange(desc(correlation)) %>%
+  slice_head(n = 5) %>%
+  pull(item_id)
+
+# Find the 5 products with the lowest correlations
+bottom_corr_products <- correlation_by_product %>%
+  filter(!is.na(correlation)) %>%
+  arrange(correlation) %>%
+  slice_head(n = 5) %>%
+  pull(item_id)
+
+# Plot scatterplots for the products with the highest correlations
+top_corr_data <- merged_data2 %>%
+  filter(item_id %in% top_corr_products)
+
+ggplot(top_corr_data, aes(x = sell_price, y = sales)) +
+  geom_point() +
+  facet_wrap(~item_id, scales = "free") +
+  labs(title = "Scatterplots of Price vs Sales for Top Correlated Products",
+       x = "Sell Price", y = "Sales")
+
+# Plot scatterplots for the products with the lowest correlations
+bottom_corr_data <- merged_data2 %>%
+  filter(item_id %in% bottom_corr_products)
+
+ggplot(bottom_corr_data, aes(x = sell_price, y = sales)) +
+  geom_point() +
+  facet_wrap(~item_id, scales = "free") +
+  labs(title = "Scatterplots of Price vs Sales for Bottom Correlated Products",
+       x = "Sell Price", y = "Sales")
+```
+```{r}
+# summary(correlation_by_product)
+```
+
+
+```{r}
+# Convert correlation variable to numeric
+# Plot aggregated correlations with continuous color gradient
+correlation_by_product%>%
+  filter(!is.na(correlation))|>
+  
+  mutate(
+    correlation = as.double(correlation),
+    ) %>%
+ggplot( aes(x = reorder(item_id, -correlation), y = correlation, fill = correlation)) +
+  geom_col(color = "black") +
+  scale_fill_gradient(low = "red", high = "green") +
+  labs(title = "Aggregated Correlations between Sales and Price",
+       x = "Item ID", y = "Correlation") +
+  theme_minimal()
+```
+
+```{r}
+number_of_top = 15
+# Filter out NAs for better visualization
+correlation_by_product <- correlation_by_product %>%
+  filter(!is.na(correlation))
+
+# Sort by correlation
+correlation_by_product <- correlation_by_product %>%
+  arrange(correlation)
+
+# Select top and bottom 40 item IDs by correlation
+top_and_bottom_40 <- correlation_by_product %>%
+  slice(c(1:number_of_top, (n() - number_of_top+1):n()))
+
+# Convert item_id to a factor to ensure categorical color scale
+top_and_bottom_40$item_id <- factor(top_and_bottom_40$item_id, levels = unique(top_and_bottom_40$item_id))
+
+# Define a custom color palette with 40 distinct colors
+custom_palette <- scales::hue_pal()(number_of_top*2)
+
+# Plot aggregated correlations with custom color scale
+ggplot(top_and_bottom_40, aes(x = item_id, y = correlation, fill = item_id)) +
+  geom_bar(stat = "identity", color = "black") +
+  scale_fill_manual(values = custom_palette) +  # Use manual scale with custom palette
+  labs(title = paste("Top and Bottom", number_of_top * 2, "Correlations between Sales and Price"),
+       x = "Item ID", y = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+```{r}
+# Find the product with the highest correlation
+max_corr_product <- correlation_by_product %>%
+  filter(!is.na(correlation)) %>%
+  arrange(desc(correlation)) %>%
+  slice(1) %>%
+  pull(item_id)
+
+# Filter data for the product with the highest correlation
+selected_product_data <- merged_data2 %>%
+  filter(item_id == max_corr_product)
+
+# Plot scatterplot
+ggplot(selected_product_data, aes(x = sell_price, y = sales)) +
+  geom_point() +
+  labs(title = paste("Scatterplot of Price vs Sales for", max_corr_product),
+       x = "Sell Price", y = "Sales")
+```
+
+```{r}
+number_of_top <- 10  # Change this value as needed
+
+# Filter out NAs for better visualization
+correlation_by_product <- correlation_by_product %>%
+  filter(!is.na(correlation))
+
+# Sort by correlation
+correlation_by_product <- correlation_by_product %>%
+  arrange(correlation)
+
+# Select top and bottom N item IDs by correlation
+top_and_bottom_N <- correlation_by_product %>%
+  slice(c(1:number_of_top, (n() - number_of_top + 1):n()))
+
+# Convert item_id to a factor to ensure categorical color scale
+top_and_bottom_N$item_id <- factor(top_and_bottom_N$item_id, levels = unique(top_and_bottom_N$item_id))
+
+# Define a custom color palette with N*2 distinct colors
+custom_palette <- scales::hue_pal()(number_of_top * 2+1)
+
+
+# Create a data frame for overall correlation
+overall_correlation_df <- data.frame(item_id = "Overall", correlation = overall_correlation)
+
+# Combine top and bottom correlations with overall correlation
+combined_data <- rbind(top_and_bottom_N, overall_correlation_df)
+
+# Plot aggregated correlations with custom color scale
+ggplot(combined_data, aes(x = item_id, y = correlation, fill = item_id)) +
+  geom_bar(stat = "identity", color = "black") +
+  scale_fill_manual(values = custom_palette) +  # Use manual scale with custom palette
+  labs(title = paste("Top and Bottom", number_of_top * 2, "Correlations between Sales and Price"),
+       x = "Item ID", y = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+
+# Convert date to week to identify changes on a weekly basis
+merged_data2 <- merged_data2 %>%
+  mutate(week = lubridate::week(date))
+
+# Calculate the percentage change in sales when the price changes
+sales_change <- merged_data2 %>%
+  group_by(item_id, week) %>%
+  summarize(mean_price = mean(sell_price, na.rm = TRUE),
+            mean_sales = mean(sales, na.rm = TRUE)) %>%
+  arrange(item_id, week) %>%
+  mutate(sales_change = c(NA, diff(mean_sales)),
+         price_change = c(NA, diff(mean_price)),
+         sales_change_percentage = (sales_change / lag(mean_sales)) * 100)
+
+# Filter out NAs and arrange by the absolute value of sales change percentage
+top_sales_change_products <- sales_change %>%
+  filter(!is.na(price_change) & !is.na(sales_change_percentage)) %>%
+  arrange(desc(abs(sales_change_percentage))) %>%
+  group_by(item_id) %>%
+  slice_head(n = 1)  # Select the top product for each item_id based on sales change
+
+top_sales_change_products <- top_sales_change_products %>%
+  filter(price_change != 0) %>%  # Exclude rows where price_change is 0
+  mutate(sales_price_ratio = sales_change / price_change) %>%
+  arrange(desc(sales_price_ratio))
+
+# Display the top products with the highest ratio of sales_change to price_change
+print(top_sales_change_products)
+
+#top_sales_change_products|>arrange(desc(sales_change))|>print()
+```
+
+
+
+```{r}
+# Convert date to week to identify changes on a weekly basis
+merged_data2 <- merged_data2 %>%
+  mutate(week = lubridate::week(date))
+
+# Calculate the percentage change in sales when the price changes
+sales_change <- merged_data2 %>%
+  group_by(item_id, week) %>%
+  summarize(mean_price = mean(sell_price, na.rm = TRUE),
+            mean_sales = mean(sales, na.rm = TRUE)) %>%
+  arrange(item_id, week) %>%
+  mutate(sales_change = c(NA, diff(mean_sales)),
+         price_change = c(NA, diff(mean_price)),
+         sales_change_percentage = (sales_change / lag(mean_sales)) * 100)
+
+# Filter out NAs and arrange by the absolute value of sales change percentage
+top_sales_change_products <- sales_change %>%
+  filter(!is.na(price_change) & !is.na(sales_change_percentage)) %>%
+  arrange(desc(abs(sales_change_percentage))) %>%
+  group_by(item_id) %>%
+  slice_head(n = 1)  # Select the top product for each item_id based on sales change
+
+# Exclude rows where price_change is 0
+top_sales_change_products <- top_sales_change_products %>%
+  filter(price_change != 0) %>%
+  mutate(sales_price_ratio = sales_change / price_change) %>%
+  arrange(desc(sales_price_ratio))
+
+# Calculate the average sales_price_ratio for each product
+average_sales_price_ratio <- top_sales_change_products %>%
+  group_by(item_id) %>%
+  summarize(average_sales_price_ratio = mean(sales_price_ratio, na.rm = TRUE))|>arrange(desc(average_sales_price_ratio))
+
+# Display the average sales_price_ratio for each product
+print(average_sales_price_ratio)
+
+```
+
+
+
+#!!!! Basic price EDA below
+
+```{r}
+# library(dplyr)
+# 
+# # Group by item_id
+# grouped_data <- cleaned_data %>%
+#   group_by(item_id) %>%
+#   summarise(always_zero_sales = all(sales == 0))
+# 
+# # Identify item_ids that always have sales as 0
+# item_ids_always_zero_sales <- grouped_data %>%
+#   filter(always_zero_sales) %>%
+#   pull(item_id)
+# 
+# # Print or further analyze the results
+# # print(item_ids_always_zero_sales)
+# # Filter cleaned_data for item_ids with always zero sales
+# subset_data <- cleaned_data %>%
+#   filter(item_id %in% item_ids_always_zero_sales)
+# 
+# # Check summary statistics
+# summary(subset_data)
+
+```
+
+
+
+```{r}
+
+stat_train <- sales_train_validation %>% 
+  #sample_n(50) %>%   
+  select(id, starts_with("d_")) %>% 
+  mutate(id = str_replace(id, "_validation", ""))
+
+
+
+stat_mean <- stat_train %>% 
+  mutate(across(starts_with("d_"), ~na_if(., 0))) %>% 
+  mutate(mean = rowMeans(select(., starts_with("d_")), na.rm = TRUE)) %>% 
+  select(id, mean)
+
+stat_zero <- stat_train %>% 
+  select(-contains("id")) %>% 
+  mutate(across(everything(), ~na_if(., 0))) %>% 
+  is.na() %>% 
+  as_tibble() %>% 
+  mutate(sum = rowSums(select(., everything()), na.rm = TRUE)) %>% 
+  mutate(mean = sum / (ncol(stat_train) - 1)) %>% 
+  select(sum, mean)
+  
+stat_prices <- sell_prices %>% 
+  unite(col = "id", item_id, store_id, sep  = "_") %>%
+  semi_join(stat_train, by = "id")
+```
+
+
+```{r}
+p1 <- stat_zero %>% 
+  ggplot(aes(mean)) +
+  geom_density(fill = "blue", bw = 0.02) +
+  scale_x_continuous(labels = scales::percent) +
+  coord_cartesian(xlim = c(0, 1)) +
+  theme_hc() +
+  theme(axis.text.y = element_blank()) +
+  labs(x = "", y = "", title = "a) Density: Percentage of zero values")
+
+
+foo <- stat_prices %>% 
+  distinct(id, sell_price) %>% 
+  group_by(id) %>% 
+  summarise(mean_price = mean(sell_price),
+            min_price = min(sell_price),
+            max_price = max(sell_price),
+            ct = n()) %>%
+  mutate(var_price = (max_price - min_price)/ mean_price)# %>% 
+  # separate(id, into = c("cat", "dept", "item", "state", "store"), sep = "_")
+
+p2 <- foo %>% 
+  ggplot(aes(ct)) +
+#  geom_boxplot() +
+#  geom_jitter(height = 0.1) +
+  scale_x_log10(breaks = c(1, 2, 5, 10, 20)) +
+  geom_density(fill = "red",bw = 0.2, alpha = 0.5) +
+  theme_hc() +
+  theme(legend.position = "bottom") +
+  labs( x = "",y = "", fill = "", title = "b) Density: Number of Price changes")
+
+p3 <- foo %>% 
+  ggplot(aes(mean_price)) +
+  geom_density(fill = "darkgreen")  +
+  theme_hc() +
+  theme(axis.text.y = element_blank(), legend.position = "none") +
+  labs(x = "Price [$]", y = "", title = "c) Density: Mean item price")
+
+p4 <- foo %>% 
+  ggplot(aes(var_price)) +
+  geom_density(fill = "green3")  +
+  scale_x_continuous(labels = scales::percent) +
+  coord_cartesian(xlim = c(0, 2)) +
+  theme_hc() +
+  theme(axis.text.y = element_blank(), legend.position = "none") +
+  labs(x = "", y = "", title = "d) Density: Normalised price variations")
+
+# jpeg(file="../Figures/general_price_stats.png",width = 700,height = 700)
+(p1 + p2) / (p3 + p4)
+# dev.off()
+```
+
+```{r}
+mean_price <- foo$mean_price
+mean_price_all_items <- mean(mean_price)
+```
+
+
+Regarding prices, the exploratory data analysis (EDA) reveals notable patterns. In Plot 1a), a significant portion of items exhibits a lack of pricing data for extended durations within the dataset. This phenomenon may be attributed to the intermittent availability of certain food items throughout the year.
+
+Moving on to Plot 1b), spanning the 5-year timeframe, it becomes evident that substantial fluctuations in item prices are infrequent and the normalized variations in prices, depicted in Plot 1d), reach peaks of approximately 10%. Additionally, the mean item price across the dataset is observed to be $2.72. These insights shed light on the temporal dynamics and stability within the pricing data, contributing valuable context to the broader understanding of the dataset.
+
+
+```{r}
+# jpeg(file="../Figures/average_prices_yearly.png",width = 700,height = 700)
+library(anytime)
+foo <- sell_prices %>% 
+  select(wm_yr_wk, sell_price) %>% 
+  left_join(calendar %>% 
+               select(date, wm_yr_wk) %>% 
+               group_by(wm_yr_wk) %>% 
+               slice(1), by = "wm_yr_wk")
+
+# Convert date to Date type using anytime
+foo <- foo %>% mutate(date = anydate(date))
+
+foo <- foo %>% 
+  mutate(year = year(date),
+         month = month(date, label = TRUE, abbr = TRUE)) %>% 
+  mutate(year_mon = format(date, "%Y-%m")) %>% 
+  ungroup()
+
+foo %>% 
+  sample_frac(0.3) %>% 
+  ggplot(aes(x = sell_price, y = factor(year))) +
+  geom_density_ridges(bandwidth = 0.1, alpha = 0.5) +
+  scale_x_log10(breaks = c(0.5, 1, 2, 5, 10, 25)) +
+  coord_cartesian(xlim = c(0.4, 30)) +
+  theme(legend.position = "bottom") +
+  labs(x = "Average Sales Price [$]", y = "",
+       title = "Average Item Prices over the years")
+
+# dev.off()
+```
+
+#Study price changes to sales
+
+```{r}
+#Get some examples to study
+example_ids <- str_c(c("FOODS_3_030_TX_3", "FOODS_3_520_TX_3", "FOODS_3_287_TX_3"), "_validation")
+
+example_sales <- sales_train_validation %>% 
+  filter(id %in% example_ids) %>%  
+  extract_ts()
+ 
+
+example_prices <- sell_prices %>% 
+  unite("id", item_id, store_id, sep = "_") %>% 
+  filter(id %in% str_remove(example_ids, "_validation"))
+
+example_calendar <- calendar %>% 
+  select(date, wm_yr_wk, event_name_1, starts_with("snap")) %>% 
+  pivot_longer(starts_with("snap"), values_to = "snap") %>% 
+  rename(event = event_name_1)%>% 
+  mutate(date = anydate(date))
+
+
+example <- example_sales %>% 
+  left_join(example_calendar, by = c("dates" = "date")) %>% 
+  left_join(example_prices, by = c("id", "wm_yr_wk")) %>% 
+  mutate(snap = as.factor(if_else(snap == 1, "SNAP", "Other")))
+```
+
+
+
+```{r}
+# start and end times for price changes
+price_intervals <- example %>% 
+  group_by(id) %>% 
+  mutate(foo = lead(sell_price, 1)) %>% 
+  filter((sell_price != foo) | (is.na(foo) & !is.na(sell_price)) ) %>% 
+  select(id, dates, sell_price) %>% 
+  mutate(price_start = lag(dates, 1)) %>% 
+  replace_na(list(price_start = min(example$dates))) %>% 
+  rename(price_end = dates)
+```
+
+
+```{r}
+# jpeg(file="../Figures/3price_change_sales.png",width = 700,height = 700)
+p1 <- example %>% 
+  filter(id == "FOODS_3_030_TX_3") %>% 
+  select(id, dates, sales) %>% 
+  left_join(price_intervals, by = c("id", "dates" = "price_start")) %>% 
+  mutate(price_start = if_else(is.na(price_end), date(NA_character_), dates)) %>% 
+  ggplot(aes(dates, sales, group = id)) +
+  geom_rect(aes(xmin = price_start, xmax = price_end, ymin = 0, ymax = Inf, fill = sell_price), na.rm = TRUE) +
+  #geom_line(col = scales::hue_pal()(3)[1], na.rm = TRUE) +
+  geom_line(col = "grey30", na.rm = TRUE) +
+  #scale_colour_hue(guide = FALSE) +
+  #scale_fill_gradient(low = "grey90", high = "grey70") +
+  scale_fill_viridis_c(begin = 1, end = 0.4, alpha = 0.7) +
+  theme_hc() +
+  theme(legend.position = "right") +
+  labs(x = "", y = "Sales", fill = "Price [$]", title = "FOODS_3_030_TX_3")
+
+p2 <- example %>% 
+  filter(id == "FOODS_3_520_TX_3") %>% 
+  select(id, dates, sales) %>% 
+  left_join(price_intervals, by = c("id", "dates" = "price_start")) %>% 
+  mutate(price_start = if_else(is.na(price_end), date(NA_character_), dates)) %>% 
+  ggplot(aes(dates, sales, group = id)) +
+  geom_rect(aes(xmin = price_start, xmax = price_end, ymin = 0, ymax = Inf, fill = sell_price), na.rm = TRUE) +
+  # geom_line(col = scales::hue_pal()(3)[2], na.rm = TRUE) +
+  geom_line(col = "grey30", na.rm = TRUE) +
+  #scale_colour_hue(guide = FALSE) +
+  # scale_fill_gradient(low = "grey90", high = "grey70") +
+  scale_fill_viridis_c(begin = 1, end = 0.4, alpha = 0.7) +
+  theme_hc() +
+  theme(legend.position = "right") +
+  labs(x = "", y = "Sales", fill = "Price [$]", title = "FOODS_3_520_TX_3")
+
+p3 <- example %>% 
+  filter(id == "FOODS_3_287_TX_3") %>% 
+  select(id, dates, sales) %>% 
+  left_join(price_intervals, by = c("id", "dates" = "price_start")) %>% 
+  mutate(price_start = if_else(is.na(price_end), date(NA_character_), dates)) %>% 
+  ggplot(aes(dates, sales, group = id)) +
+  geom_rect(aes(xmin = price_start, xmax = price_end, ymin = 0, ymax = Inf, fill = sell_price), na.rm = TRUE) +
+  # geom_line(col = scales::hue_pal()(3)[3], na.rm = TRUE) +
+  geom_line(col = "grey30", na.rm = TRUE) +
+  #scale_colour_hue(guide = FALSE) +
+  # scale_fill_gradient(low = "grey90", high = "grey70") +
+  scale_fill_viridis_c(begin = 1, end = 0.4, alpha = 0.7) +
+  theme_hc() +
+  theme(legend.position = "right") +
+  labs(x = "", y = "Sales", fill = "Price [$]", title = "FOODS_3_287_TX_3")
+
+p1 / p2 / p3 + plot_annotation(title = 'Price changes for 3 random items over full training period',
+                               subtitle = "Line charts = sales curves. Background colour = sell price. Lighter colours = lower prices")
+
+# dev.off()
+```
+To comprehend the impact of prices on sales, it is crucial to investigate whether both short-term and prolonged alterations in pricing influence consumer purchasing behaviors. The overall correlation between price fluctuations and sales is observed to be $-0.1306$, indicating a modest decrease in sales predominantly associated with price increases.
+
+In Figure \ref{}, the sales dynamics for three exemplar items are illustrated, with the orange line representing scaled prices. Notably, certain products, such as "FOODS_3_030_TX_3" during 2013-2014, demonstrate a considerable influence of price changes on sales. Conversely, for other items like "FOODS_3_520_TX_3," consumer purchasing appears relatively stable, irrespective of price variations. Moreover, a noticeable trend emerges – when there is a prolonged absence in sales followed by a price change, sales tend to recover in the majority of cases. This analysis provides valuable insights into the nuanced relationship between pricing dynamics and consumer behavior within the dataset.
+
+```{r}
+# start and end times for SNAP intervals
+snap_intervals <- example %>%
+  mutate(foo = lead(snap, 1),
+         bar = lag(snap, 1)) %>% 
+  mutate(snap_start = if_else(snap == "SNAP" & bar == "Other", dates, date(NA_character_)),
+         snap_end = if_else(snap == "SNAP" & foo == "Other", dates, date(NA_character_))) %>% 
+  ungroup()
+
+snap_intervals <- snap_intervals %>% 
+  select( snap_start) %>% 
+  filter(!is.na(snap_start)) %>% 
+  bind_cols(snap_intervals %>% 
+    select(snap_end) %>% 
+    filter(!is.na(snap_end)))
+```
+
+
+
+```{r}
+gg <- example %>% 
+  #filter(between(dates, date("2015-05-01"), date("2015-10-01"))) %>% 
+  #mutate(has_event = if_else(str_length(event) > 0, sales, NA_real_)) %>% 
+  group_by(id) %>% 
+  mutate(max_sales = max(sales, na.rm = TRUE),
+         min_price = min(sell_price, na.rm = TRUE),
+         max_price = max(sell_price, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  mutate(rel_price = (sell_price - min_price)/(max_price - min_price) * max_sales * 0.6 + max_sales*0.4) %>% 
+  left_join(snap_intervals, by = c("dates" = "snap_start")) %>% 
+  mutate(snap_start = if_else(is.na(snap_end), date(NA_character_), dates)) %>% 
+  ggplot(aes(dates, sales, group = id)) +
+  #geom_rect(aes(xmin = snap_start, xmax = snap_end, ymin = 0, ymax = max_sales), fill = "grey90", na.rm = TRUE) +
+  geom_line(aes(col = id), na.rm = TRUE) +
+  geom_line(aes(dates, rel_price), col = "orange", size = 1.5, alpha = 0.3, na.rm = TRUE) +
+  #eom_point(aes(dates, has_event), na.rm = TRUE) +
+  # coord_cartesian(xlim = c(date("2015-05-01"), date("2015-10-01"))) + 
+  facet_wrap(~id, nrow = 3, scales = "free") +   
+  theme_hc() +
+  theme(legend.position = "none", strip.background = element_blank(), strip.text = element_text(size = 10),
+        panel.spacing = unit(1, "lines"), plot.title = element_text(size = 10)) +
+  labs(x = "", y = "Sales", title = "Sales + Prices for 3 items\nOrange = Scaled Price.")
+
+ggplotly(gg, dynamicTicks = TRUE)
+```
+
+
+
+
+
+
+```{r}
+
+
+# Calculate max_sell_price for each item_id
+dt_tmp <- sell_prices %>%
+  group_by(item_id) %>%
+  summarise(max_sell_price = max(sell_price))
+
+# Assign price_rank based on the descending order of max_sell_price
+dt_tmp <- dt_tmp %>%
+  mutate(price_rank = row_number(desc(max_sell_price)))
+
+# Join the data and plot the top 30 items by max_sell_price
+g <- 
+  sell_prices %>%  
+  left_join(dt_tmp, by = "item_id") %>% 
+  filter(price_rank <= 50) %>% 
+  mutate(item_name = str_sub(item_id, nchar(item_id)-3, nchar(item_id))) %>%
+  ggplot(aes(x = reorder(item_name, price_rank), y = sell_price)) +
+  geom_boxplot(color = "dodgerblue3", fill = "lightsteelblue1", alpha = 0.5) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "item_id", y = "Sell price", 
+       title = "Top 50 Items by Maximum Selling Price",
+       subtitle = "Each item's maximum selling price and its rank")
+
+plot(g)
+
+```
+Here’s a breakdown of the elements in this boxplot:
+
+Central line in the box: Median of the data (second quartile).
+Box: Spans from the first quartile (Q1) to the third quartile (Q3), containing the middle 50% of the data.
+Whiskers: Extend from the box to the smallest and largest values within 1.5 * IQR from the Q1 and Q3, respectively.
+Dots (Outliers): Data points that fall outside the range of the whiskers.
+
+
+

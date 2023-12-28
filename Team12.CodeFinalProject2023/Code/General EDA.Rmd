@@ -1,0 +1,280 @@
+---
+title: "EDA"
+output: html_document
+date: "2023-12-20"
+---
+
+```{r, echo=FALSE}
+library(vroom)
+library(stringr)
+library(dplyr)
+library(tidyverse)
+library(kableExtra)
+library(plotly)
+library(zoo)
+library(ggthemes)
+library(ggplot2)
+library(gridExtra)
+library(shiny)
+library(tsibble)
+library(fable)
+library(ggplot2)
+library(lubridate)
+```
+
+Quick loading the datasets
+```{r}
+#---------------------LOAD DATASETS---------------------
+path = 'C:/Users/dimts/Downloads/'
+
+sell_prices <- vroom(str_c(path,"sell_prices_afcs2023.csv"), delim = ",", col_types = cols())
+
+sales_train_validation <- vroom(str_c(path,"sales_train_validation_afcs2023.csv"), delim = ",", col_types = cols())
+
+calendar <- vroom(str_c(path,"calendar_afcs2023.csv"), delim = ",", col_types = cols())
+
+#sales_test_validation <- vroom(str_c(path,"sales_test_validation_afcs2022.csv"), delim = ",", col_types = cols())
+
+#samples_submission <- vroom(str_c(path,"sample_submission_afcs2023.csv"), delim = ",", col_types = cols())
+
+```
+
+First off, we will investigate the Time series for the total sales. Looking at the plot we notice an increasing Trend in total sales, with obvious weekly, monthly and yearly seasonalities, which we discuss further below. Additionally, we notice the 5 troughs in sales that occur on the 25th of December due to the store being closed. There are some seemingly random spikes throughout the series that could be circumstantial and the overall variation is constant - does not increase with the level of the series.
+
+```{r}
+extract_ts <- function(df){
+  min_date <- as.Date("2011-01-29") #lowest data, corresponds to d_1
+  df %>%
+    select(id, starts_with("d_")) %>%   #take the id of the item and the daily sales columns
+    pivot_longer(starts_with("d_"), names_to = "dates", values_to = "sales") %>%     #reshape
+    mutate(dates = as.integer(str_remove(dates, "d_"))) %>%   
+    mutate(dates = min_date + dates - 1) %>%         #turn day numbers into dates
+    mutate(id = str_remove(id, "_validation"))       #remove end of item id
+}
+
+foo <- sales_train_validation %>%            #sum of columns for each day
+  summarise_at(vars(starts_with("d_")), sum) %>% 
+  mutate(id = 1)
+
+bar <- extract_ts(foo)
+gg <- bar %>% 
+  ggplot(aes(dates, sales)) +
+  geom_line(col = "blue") +
+  theme_tufte() +
+  labs(x = "Date", y = "Sales", title = "Total sales Time series")
+
+ggplotly(gg, dynamicTicks = TRUE)
+```
+
+To get a better understanding of our data, we choose to plot a random set of items. We observe that there are many low values with some seemingly random spikes. These spikes, if they were random or similar to white noise would make our forecasts difficult. Another particularity is that a lot of products are intermittently unavailable (their selling price during some weeks is missing). However, this case should be treated differently from instances where the product was available (selling price was recorded), but still had a recorded sale of 0, due to no demand.
+
+```{r}
+#50 random items, more clear info
+set.seed(133)  # Set seed for reproducibility
+random_items <- sample(unique(sales_train_validation$id), 8)
+
+sales_selected <- sales_train_validation %>%
+  filter(id %in% random_items) %>%
+  select(id, starts_with("d_")) %>%  
+  pivot_longer(starts_with("d_"), names_to = "dates", values_to = "sales") %>%
+  mutate(dates = as.integer(str_remove(dates, "d_")),
+         id = str_remove(id, "_TX_3_validation"))  # Remove "_TX_3_validation" from id
+
+
+plot <- sales_selected %>%
+  plot_ly(x = ~as.Date("2011-01-29") + dates - 1, y = ~sales, color = ~id, type = 'scatter', mode = 'lines') %>%
+  layout(title = "Sales Over Time for 8 random items",
+         xaxis = list(title = "Date"),
+         yaxis = list(title = "Sales"),
+         showlegend = TRUE,
+         colorway = "Set3")
+
+plot
+```
+
+Merging here.
+```{r}
+#change column names from d_1 to dates
+#also fix item_id
+sales_train_validation_long <- sales_train_validation %>%
+  pivot_longer(cols = -id, names_to = "date", values_to = "sales") %>%
+  mutate(date = as.Date("2011-01-29") + as.integer(str_remove(date, "d_")) - 1) %>%
+  rename(item_id = id) %>%
+  mutate(item_id = str_remove(item_id, "_TX_3_validation"))
+
+calendar <- calendar %>%
+  mutate(date = as.Date(date, format = "%m/%d/%Y"))
+
+result <- merge(calendar, sales_train_validation_long, by = "date", all.x = TRUE)
+result <- result %>%
+  arrange(date, item_id)
+
+merged_data <- result %>%
+  left_join(sell_prices %>% select(wm_yr_wk, item_id, sell_price), by = c("wm_yr_wk", "item_id"))
+
+merged_data
+```
+
+Continuing to focus on the behavior of individual items, we discover that item 586 had the highest mean sales through-out the whole recorded period, while 171 had the lowest. It is also worth noting that 586 was available every day, while 171 was out-of-stock for 1183 days. Lastly, looking at the last year (365 days), both items follow an increase in their sales, keeping to the increasing overall trend we saw above.
+```{r}
+mean_sales_by_item <- merged_data %>%
+  group_by(item_id) %>%
+  summarize(mean_sales = mean(sales, na.rm = TRUE))
+```
+
+
+```{r}
+outlier_threshold <- 2 * IQR(mean_sales_by_item$mean_sales, na.rm = TRUE)
+outliers <- mean_sales_by_item %>%
+  filter(mean_sales > quantile(mean_sales, 0.75, na.rm = TRUE) + outlier_threshold | mean_sales < quantile(mean_sales, 0.25, na.rm = TRUE) - outlier_threshold)
+
+highest_mean <- mean_sales_by_item %>%
+  top_n(1, wt = mean_sales)
+lowest_mean <- mean_sales_by_item %>%
+  top_n(-1, wt = mean_sales)
+
+latest_date <- max(merged_data$date) 
+sales_last_year <- merged_data %>%
+  filter(date > (latest_date - days(365)))
+
+increase_in_sales_highest_mean <- sales_last_year %>%
+  filter(item_id %in% highest_mean$item_id) %>%
+  group_by(item_id) %>%
+  summarize(increase_in_sales = sum(sales) > 0)
+
+increase_in_sales_lowest_mean <- sales_last_year %>%
+  filter(item_id %in% lowest_mean$item_id) %>%
+  group_by(item_id) %>%
+  summarize(increase_in_sales = sum(sales) > 0)
+
+print(outliers)
+print(highest_mean)
+print(lowest_mean)
+print(increase_in_sales_highest_mean)
+print(increase_in_sales_lowest_mean)
+```
+
+```{r}
+lowest_selling_product <- mean_sales_by_item %>%
+  filter(mean_sales == min(mean_sales, na.rm = TRUE)) %>%
+  pull(item_id, mean_sales)
+
+lowest_selling_product_data <- merged_data %>%
+  filter(item_id == lowest_selling_product)
+
+days_with_na_price <- lowest_selling_product_data %>%
+  filter(is.na(sell_price)) %>%
+  summarize(total_days_with_na = n())
+print(days_with_na_price)
+```
+
+
+At this point, we will hone in on the underlying Temporal Patterns of our data, that are not easily grasped by the Aggregated Plot. Specifically, we will look at 2 Heatmaps. 
+The first one represents the Relationship of the Day-of-the-Week versus the Month.
+
+It becomes obvious that Sales are higher during the weekend regardless of the month. Monday sales remain lower, but above those of the other 4 weekdays. The highest number of sales are measured on Sundays in March and August. The lowest number of sales is recorded on Thursdays in November, followed closely by Wednesdays in January. The weekly seasonality is quite consistent in the Heat-map, reinforcing our previous findings.
+```{r, fig.width = 10}
+heatmap_data <- result %>%
+  group_by(weekday, month = month(date, label = TRUE, abbr = FALSE)) %>%
+  summarise(total_sales = sum(sales, na.rm = TRUE))
+# Create the heatmap using ggplot2
+ggplot(heatmap_data, aes(x = factor(month, labels = month.name), y = factor(weekday, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")), fill = total_sales)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "yellow", high = "red") +
+  labs(title = "Total Sales Heatmap",
+       x = "",
+       y = "",
+       fill = "Total Sales") +
+  theme_minimal()
+```
+
+
+To complement the previous Heatmap, we will have a look at how the sales pan out across consecutive days of the month. As we observed before, there is clear weekly seasonality with higher number of sales during the weekend and Mondays. However, it becomes obvious that sales are higher during the first days of the month and decrease as the month progresses.
+
+```{r}
+heatmap_data <- result %>%
+  group_by(weekday = wday(date), week_of_month = 5 - (day(date) - 1) %/% 7) %>%
+  summarise(total_sales = sum(sales, na.rm = TRUE))
+
+unique_weeks <- unique(heatmap_data$week_of_month)
+custom_y_labels <- paste("Week", 5:1)
+custom_x_labels <- c("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
+
+ggplot(heatmap_data, aes(x = factor(weekday, levels = 1:7), y = factor(week_of_month, levels = unique_weeks), fill = total_sales)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "yellow", high = "red") +
+  labs(title = "Week vs Day Sales Heatmap",
+       x = "",
+       y = "",
+       fill = "Total Sales") +
+  theme_minimal() +
+  scale_y_discrete(labels = custom_y_labels) +
+  scale_x_discrete(labels = custom_x_labels)
+```
+
+```{r}
+total_sales_per_month <- result %>%
+  group_by(month = month(date, label = TRUE, abbr = FALSE)) %>%
+  summarise(total_sales = sum(sales, na.rm = TRUE))
+
+total_sales_plot <- ggplot(total_sales_per_month, aes(x = month, y = total_sales)) +
+  geom_col(fill = "blue") +
+  labs(title = "Total Sales per Month",
+       x = "Month",
+       y = "Total Sales") +
+  theme_minimal()
+print(total_sales_plot)
+```
+At this stage, we shift our focus on the calendar Events and SNAP days. The majority (90%) of the recorded data corresponds to non-event days. Among the days with events, religious events are the most common, while sporting events are the least frequent.
+```{r}
+na_event_percentage <- result %>%
+  mutate(has_event = ifelse(is.na(event_name_1), "No Event", "Event")) %>%
+  group_by(has_event) %>%
+  summarise(percentage = n() / nrow(result) * 100)
+
+p1 <- ggplot(na_event_percentage, aes(x = has_event, y = percentage, fill = has_event)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Days with Events", x = "", y = "Percentage") +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  theme_minimal() +
+  labs(fill = "Events")
+
+#number that each event type occurs
+event_counts <- result %>%
+  filter(!is.na(event_name_1)) %>%
+  group_by(event_type_1) %>%
+  summarise(count = n())
+
+p2 <- ggplot(event_counts, aes(x = event_type_1, y = count, fill = event_type_1)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Occurence of Events", x = "", y = "Count") +
+  theme_minimal() +
+  labs(fill = "Event Type")
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+Similarly, we investigate the SNAP_TX column. The Snap_TX variable is 0 for approximately 67% of the days, so SNAP purchases are not allowed for about 2/3 of the dates recorded. We also investigate the Distribution of event types for the days when SNAP is offered and they look similar to the previous plot, except for the fact that Cultural events now are the least frequent.
+
+```{r}
+snap_percentage <- result %>%
+  group_by(snap_TX) %>%
+  summarise(percentage = n() / nrow(result) * 100)
+
+# Bar plot
+ggplot(snap_percentage, aes(x = factor(snap_TX), y = percentage, fill = factor(snap_TX))) +
+  geom_bar(stat = "identity") +
+  labs(title = "Percentage of Days with 0s and 1s in snap_TX Column", x = "snap_TX", y = "Percentage") +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  theme_minimal()
+
+snap_tx_1_data <- result[result$snap_TX == 1, ]
+event_counts_snap_tx_1 <- snap_tx_1_data %>%
+  filter(!is.na(event_name_1)) %>%
+  group_by(event_type_1) %>%
+  summarise(count = n())
+ggplot(event_counts_snap_tx_1, aes(x = event_type_1, y = count, fill = event_type_1)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Number of Days with Events by Event Type (SNAP_TX = 1)", x = "Event Type", y = "Count") +
+  theme_minimal()
+```
